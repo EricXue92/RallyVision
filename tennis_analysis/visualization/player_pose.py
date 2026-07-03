@@ -75,7 +75,11 @@ class PlayerPoseVisualizer:
             bottom_center = (float((bx1 + bx2) / 2 + x1), float(by2 + y1))
             if not self._is_on_court(bottom_center, active_court_mapper):
                 continue
-            centroids.append(bottom_center)
+            centroids.append({
+                "point": bottom_center,
+                "track_id": box[5] if len(box) > 5 else None,
+                "score": box[4] if len(box) > 4 else None,
+            })
             filtered_boxes.append(box)
 
         if filtered_boxes:
@@ -174,17 +178,17 @@ class PlayerPoseVisualizer:
 
     def draw_players(self, frame, player_tracker, cached_movement_stats, stats_visualizer=None, rally_count=0):
         if self.current_box_data is not None:
-            selected_positions = [
-                player_tracker.players[position]
+            selected_players = {
+                position: player_tracker.players[position]
                 for position in ["upper", "lower"]
                 if player_tracker.players[position] is not None
-            ]
+            }
             self._draw_boxes_on_frame(
                 frame,
                 self.current_box_data["boxes"],
                 self.current_box_data["offset_x"],
                 self.current_box_data["offset_y"],
-                selected_positions,
+                selected_players,
             )
 
         if self.show_skeletons and self.current_pose_data is not None:
@@ -205,6 +209,8 @@ class PlayerPoseVisualizer:
 
             color = (0, 255, 255) if position == "upper" else (255, 0, 255)
             cv2.circle(frame, tuple(map(int, player_tracker.players[position])), 5, color, -1, cv2.LINE_AA)
+            if self.current_box_data is None:
+                self._draw_player_label(frame, position, player_tracker.players[position], color)
 
             if self.show_player_trajectories:
                 history = list(player_tracker.history[position])
@@ -245,18 +251,52 @@ class PlayerPoseVisualizer:
                 if x_raw > 1 and y_raw > 1:
                     cv2.circle(frame, (int(x_raw + offset_x), int(y_raw + offset_y)), 3, (255, 128, 0), -1, cv2.LINE_AA)
 
-    def _draw_boxes_on_frame(self, frame, boxes, offset_x, offset_y, selected_positions):
-        selected_positions = [np.array(pos, dtype=np.float32) for pos in selected_positions]
+    def _draw_boxes_on_frame(self, frame, boxes, offset_x, offset_y, selected_players):
+        selected_players = {
+            region: np.array(pos, dtype=np.float32)
+            for region, pos in selected_players.items()
+        }
         for box in boxes:
             x1, y1, x2, y2 = box[:4]
             bottom_center_arr = np.array([float((x1 + x2) / 2 + offset_x), float(y2 + offset_y)], dtype=np.float32)
-            if not any(np.linalg.norm(bottom_center_arr - selected) <= 12 for selected in selected_positions):
+            region = self._matched_selected_region(bottom_center_arr, selected_players)
+            if region is None:
                 continue
+            color = (0, 255, 255) if region == "upper" else (255, 0, 255)
             pt1 = (int(x1 + offset_x), int(y1 + offset_y))
             pt2 = (int(x2 + offset_x), int(y2 + offset_y))
             bottom_center = tuple(map(int, bottom_center_arr))
-            cv2.rectangle(frame, pt1, pt2, (0, 180, 255), 2, cv2.LINE_AA)
-            cv2.circle(frame, bottom_center, 4, (0, 180, 255), -1, cv2.LINE_AA)
+            cv2.rectangle(frame, pt1, pt2, color, 2, cv2.LINE_AA)
+            cv2.circle(frame, bottom_center, 4, color, -1, cv2.LINE_AA)
+            self._draw_player_label(frame, region, (pt1[0], pt1[1]), color, anchor="box")
+
+    def _matched_selected_region(self, bottom_center, selected_players):
+        best_region = None
+        best_distance = None
+        for region, selected in selected_players.items():
+            distance = float(np.linalg.norm(bottom_center - selected))
+            if distance <= 12 and (best_distance is None or distance < best_distance):
+                best_region = region
+                best_distance = distance
+        return best_region
+
+    def _draw_player_label(self, frame, region, point, color, anchor="point"):
+        label = "Upper" if region == "upper" else "Lower"
+        x, y = int(point[0]), int(point[1])
+        if anchor == "point":
+            origin = (x + 8, y - 8)
+        else:
+            origin = (x, max(18, y - 7))
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.54
+        thickness = 1
+        (text_width, text_height), baseline = cv2.getTextSize(label, font, scale, thickness)
+        x1 = max(0, origin[0] - 3)
+        y1 = max(0, origin[1] - text_height - baseline - 3)
+        x2 = min(frame.shape[1] - 1, origin[0] + text_width + 3)
+        y2 = min(frame.shape[0] - 1, origin[1] + baseline + 3)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (20, 20, 20), -1)
+        cv2.putText(frame, label, origin, font, scale, color, thickness, cv2.LINE_AA)
 
     def get_current_pose_data(self):
         return self.current_pose_data

@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 
+from ..media.video_audio import encode_vscode_compatible_mp4
 from ..visualization.minimap import MiniMapVisualizer
 
 
@@ -233,8 +234,12 @@ class BounceDetector:
         fps = video.get(cv2.CAP_PROP_FPS)
         width = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        raw_output_video_path = f"{output_video_path}.raw.mp4"
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
+        writer = cv2.VideoWriter(raw_output_video_path, fourcc, fps, (width, height))
+        if not writer.isOpened():
+            video.release()
+            raise RuntimeError(f"Unable to create bounce annotation video: {raw_output_video_path}")
         display_frames = max(1, int((fps or self.fps) * float(display_sec)))
         minimap = MiniMapVisualizer() if draw_minimap_bounces else None
         frame_index = 0
@@ -261,6 +266,9 @@ class BounceDetector:
 
         video.release()
         writer.release()
+        encode_vscode_compatible_mp4(raw_output_video_path, output_video_path)
+        if os.path.exists(raw_output_video_path):
+            os.remove(raw_output_video_path)
         return True
 
     def draw_processed_trajectory(self, frame, frame_index, trajectory_by_frame, trajectory_length=30):
@@ -512,9 +520,9 @@ class BounceDetector:
             self._repair_legacy_classifier(self.classifier)
         except Exception as exc:
             self.classifier_error = f"{type(exc).__name__}: {exc}"
-            print(f"弹跳分类模型加载失败，回退规则评分: {self.classifier_error}")
+            print(f"寮硅烦鍒嗙被妯″瀷鍔犺浇澶辫触锛屽洖閫€瑙勫垯璇勫垎: {self.classifier_error}")
             return None
-        print(f"已加载弹跳分类模型: {self.classifier_path}")
+        print(f"宸插姞杞藉脊璺冲垎绫绘ā鍨? {self.classifier_path}")
         return self.classifier
 
     def _repair_legacy_classifier(self, classifier):
@@ -657,3 +665,4 @@ class BounceDetector:
         if denom <= 1e-6:
             return float(np.linalg.norm(point - line_start))
         return float(abs(np.cross(line, point - line_start)) / denom)
+

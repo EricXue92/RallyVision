@@ -18,12 +18,15 @@
             self.device = selected
         else:
             self.device = device
+        self.half = self.device != "cpu"
 
         print(f"Initializing YOLO pose model (model: {self.model_path}, device: {self.device})")
         self.model = YOLO(self.model_path)
+        self._fuse_model()
+        self._warmup_model()
 
     def process_frame(self, frame):
-        result = self.model(frame, conf=self.conf, device=self.device, verbose=False)[0]
+        result = self.model(frame, conf=self.conf, device=self.device, half=self.half, verbose=False)[0]
         if result.keypoints is None or result.keypoints.xy is None:
             return None, None
 
@@ -35,4 +38,42 @@
         keypoints = keypoints.detach().cpu().numpy()
         scores = scores.detach().cpu().numpy() if scores is not None else None
         return keypoints, scores
+
+    def _fuse_model(self):
+        try:
+            import os
+            import logging
+            from contextlib import redirect_stderr, redirect_stdout
+            from ultralytics.utils import LOGGER
+
+            previous_level = LOGGER.level
+            LOGGER.setLevel(logging.ERROR)
+            try:
+                with open(os.devnull, "w") as devnull, redirect_stdout(devnull), redirect_stderr(devnull):
+                    self.model.fuse()
+            finally:
+                LOGGER.setLevel(previous_level)
+        except Exception:
+            pass
+
+    def _warmup_model(self):
+        if self.device == "cpu":
+            return
+        try:
+            import logging
+            import os
+            import numpy as np
+            from contextlib import redirect_stderr, redirect_stdout
+            from ultralytics.utils import LOGGER
+
+            previous_level = LOGGER.level
+            LOGGER.setLevel(logging.ERROR)
+            dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+            try:
+                with open(os.devnull, "w") as devnull, redirect_stdout(devnull), redirect_stderr(devnull):
+                    self.model(dummy, conf=self.conf, device=self.device, half=self.half, verbose=False)
+            finally:
+                LOGGER.setLevel(previous_level)
+        except Exception:
+            pass
 

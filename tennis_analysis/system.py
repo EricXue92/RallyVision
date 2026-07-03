@@ -44,6 +44,14 @@ def load_runtime_dependencies():
             f"Missing Python dependency: {exc.name}. "
             "Install dependencies with: pip install -r requirements.txt"
         ) from exc
+    try:
+        import torch as _torch
+        if _torch.cuda.is_available():
+            _torch.backends.cudnn.benchmark = True
+            _torch.backends.cuda.matmul.allow_tf32 = True
+            _torch.backends.cudnn.allow_tf32 = True
+    except Exception:
+        pass
 
     cv2 = _cv2
     np = _np
@@ -76,9 +84,12 @@ class TennisAnalysisSystem:
                  ball_model_path='weights/tennis-ball.pt', template_path=None,
                  pose_mode='balanced', pose_family='rtmpose',
                  yolo_pose_model='weights/yolo11s-pose.pt', player_detector='pose',
-                 person_model='weights/yolo26s.pt', show_pose_roi=True,
+                 person_model='weights/yolo26s.pt', person_tracker='none',
+                 player_detect_interval=1,
+                 show_pose_roi=True,
                  court_detection='auto-fallback', show_bounce_detection=True,
-                 bounce_classifier_path='', show_mini_map=True):
+                 bounce_classifier_path='', show_mini_map=True,
+                 court_match_width=320):
         self.video_path = video_path
         self.show_display = show_display
         self.language = language
@@ -89,9 +100,12 @@ class TennisAnalysisSystem:
         self.yolo_pose_model = yolo_pose_model
         self.player_detector = player_detector
         self.person_model = person_model
+        self.person_tracker = person_tracker
+        self.player_detect_interval = max(1, int(player_detect_interval))
         self.show_pose_roi = show_pose_roi
         self.court_detection = court_detection
         self.bounce_classifier_path = bounce_classifier_path
+        self.court_match_width = court_match_width
 
 
         self.show_skeletons = show_skeletons
@@ -119,7 +133,10 @@ class TennisAnalysisSystem:
         self.person_detector = None
         if self.player_detector == 'yolo-person':
             self.rtmpose_processor = None
-            self.person_detector = YOLOPersonDetector(model_path=self.person_model)
+            self.person_detector = YOLOPersonDetector(
+                model_path=self.person_model,
+                tracker=self.person_tracker,
+            )
         elif self.pose_family == 'yolo-pose':
             self.rtmpose_processor = YOLOPoseProcessor(model_path=self.yolo_pose_model)
         else:
@@ -142,7 +159,9 @@ class TennisAnalysisSystem:
         self.bounce_events_path = os.path.join(self.save_dir, "bounce_events.json")
         self.cleaned_ball_trajectory_path = os.path.join(self.save_dir, "cleaned_ball_trajectory.json")
         self.output_video_path = os.path.join(self.save_dir, f"detect_{self.video_name}.mp4")
+        self.temp_output_video_path = None
         self.detection_writer = None
+        self.cached_player_detection = None
         
 
         self.player_1_hand = "right"  
@@ -272,7 +291,9 @@ class TennisAnalysisSystem:
                 "tennis_ball": self.ball_model_path,
                 "player_detector": self.player_detector,
                 "person": self.person_model if self.player_detector == 'yolo-person' else None,
+                "person_tracker": self.person_tracker if self.player_detector == 'yolo-person' else None,
                 "pose_family": self.pose_family if self.player_detector == 'pose' else None,
+                "player_detect_interval": self.player_detect_interval,
             },
             "analysis": {
                 "court_detection": self.court_detection,
@@ -304,7 +325,7 @@ class TennisAnalysisSystem:
 
     def _process_frame(self, frame, template_gray, corners, roi_corners, frame_count, out, detect_frame_count):
 
-        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray_frame = self._prepare_court_match_frame(frame, template_gray)
         
         # frame = self.draw_court_roi(frame, corners, roi_corners)
 
@@ -330,6 +351,7 @@ class TennisAnalysisSystem:
             self.rally_active = False
 
             self.tennis_ball_tracker.clear_trajectory()
+            self.cached_player_detection = None
             if self.bounce_detector is not None:
                 self.bounce_detector.clear()
 
@@ -347,7 +369,8 @@ class TennisAnalysisSystem:
             cv2.putText(frame, "Pose ROI", (x1, max(24, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2, cv2.LINE_AA)
 
 
-        centroids, point_left_hands, point_right_hands = self.player_pose_visualizer.detect_players(roi, x1, y1)
+        centroids, point_left_hands, point_right_hands = self._detect_players(roi, x1, y1, detect_frame_count)
+
         detected_ball_position = self.tennis_ball_tracker.detect_ball(frame, roi_corners=roi_corners)
         ball_position = self.tennis_ball_tracker.update_trajectory(detected_ball_position, roi_corners)
         ball_court_position = self.court_mapper.image_to_court(ball_position) if ball_position != [0, 0] else None
@@ -410,6 +433,14 @@ class TennisAnalysisSystem:
                 cv2.imwrite(os.path.join(self.images_save_dir, f"{frame_count}.png"), frame)
         return frame, detect_frame_count
 
+    def _should_run_detection(self, detect_frame_count, interval):
+        return (detect_frame_count - 1) % interval == 0
+
+    def _detect_players(self, roi, x1, y1, detect_frame_count):
+        if self._should_run_detection(detect_frame_count, self.player_detect_interval) or self.cached_player_detection is None:
+            self.cached_player_detection = self.player_pose_visualizer.detect_players(roi, x1, y1)
+        return self.cached_player_detection
+
     def _get_template_path(self):
         """Get the court template image path."""
         if self.template_path:
@@ -452,8 +483,23 @@ class TennisAnalysisSystem:
         
         template_gray = cv2.resize(template_gray, (frame_width, frame_height))
         template_color = cv2.resize(template_color, (frame_width, frame_height))
+        template_match_gray = self._resize_court_match_gray(template_gray)
         
-        return template_gray, template_color
+        return template_match_gray, template_color
+
+    def _resize_court_match_gray(self, gray_frame):
+        if self.court_match_width <= 0 or gray_frame.shape[1] <= self.court_match_width:
+            return gray_frame
+
+        scale = self.court_match_width / gray_frame.shape[1]
+        height = max(1, int(round(gray_frame.shape[0] * scale)))
+        return cv2.resize(gray_frame, (self.court_match_width, height), interpolation=cv2.INTER_AREA)
+
+    def _prepare_court_match_frame(self, frame, template_gray):
+        target_size = (template_gray.shape[1], template_gray.shape[0])
+        if (frame.shape[1], frame.shape[0]) != target_size:
+            frame = cv2.resize(frame, target_size, interpolation=cv2.INTER_AREA)
+        return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
     def _setup_video_writer(self, frame_width, frame_height, fps):
 
@@ -628,14 +674,20 @@ class TennisAnalysisSystem:
 
     def _build_auto_court_preview(self, template_color, detected):
         preview = template_color.copy()
+        try:
+            preview, _ = CourtMapper(detected["corners"]).draw_court_overlay(preview)
+        except Exception:
+            pass
         corners = np.array(detected["corners"], dtype=np.int32)
         cv2.polylines(preview, [corners], True, (0, 255, 255), 3, cv2.LINE_AA)
         for index, point in enumerate(detected["corners"], start=1):
             cv2.circle(preview, tuple(point), 7, (0, 0, 255), -1, cv2.LINE_AA)
             cv2.putText(preview, str(index), (point[0] + 8, point[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
+        reference_score = detected.get("diagnostics", {}).get("reference_score")
+        reference_text = f", ref={reference_score:.2f}" if isinstance(reference_score, (int, float)) else ""
         cv2.putText(
             preview,
-            f"auto court confidence={detected['confidence']:.2f}",
+            f"auto court confidence={detected['confidence']:.2f}{reference_text}",
             (20, 36),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8,
@@ -687,7 +739,7 @@ class TennisAnalysisSystem:
             rewrite_detections=True,
         )
         print(f"弹跳后处理完成: {len(events)} 个候选点，结果={self.bounce_events_path}")
-        if not os.path.exists(self.temp_output_video_path):
+        if not self.temp_output_video_path or not os.path.exists(self.temp_output_video_path):
             return
 
         annotated_path = os.path.join(self.save_dir, f"temp_bounce_{self.video_name}.mp4")

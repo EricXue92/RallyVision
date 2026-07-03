@@ -10,13 +10,15 @@ from ..court.mapper import (
 
 
 class MiniMapVisualizer:
-    def __init__(self, width=210, height=420, margin=18, court_margin_x=3.0, court_margin_y=5.0):
+    def __init__(self, width=210, height=420, margin=18, court_margin_x=3.0, court_margin_y=5.0,
+                 max_history_jump_m=3.0):
         self.width = width
         self.height = height
         self.margin = margin
         self.padding = 16
         self.court_margin_x = court_margin_x
         self.court_margin_y = court_margin_y
+        self.max_history_jump_m = max_history_jump_m
 
     def draw(self, frame, court_history, ball_court_position=None, bounce_events=None):
         if frame is None:
@@ -88,11 +90,39 @@ class MiniMapVisualizer:
     def _draw_histories(self, frame, x, y, court_history):
         colors = {"upper": (80, 210, 255), "lower": (255, 150, 80)}
         for region, history in (court_history or {}).items():
-            points = [self._court_to_map(x, y, float(p[0]), float(p[1])) for p in history if self._valid_court_point(p)]
-            if len(points) > 1:
-                cv2.polylines(frame, [np.array(points, dtype=np.int32)], False, colors.get(region, (255, 255, 255)), 1, cv2.LINE_AA)
-            if points:
-                cv2.circle(frame, points[-1], 4, colors.get(region, (255, 255, 255)), -1, cv2.LINE_AA)
+            segments = self._history_segments(history)
+            for segment in segments:
+                points = [self._court_to_map(x, y, float(p[0]), float(p[1])) for p in segment]
+                if len(points) > 1:
+                    cv2.polylines(frame, [np.array(points, dtype=np.int32)], False, colors.get(region, (255, 255, 255)), 1, cv2.LINE_AA)
+            latest = self._latest_valid_court_point(history)
+            if latest is not None:
+                point = self._court_to_map(x, y, float(latest[0]), float(latest[1]))
+                cv2.circle(frame, point, 4, colors.get(region, (255, 255, 255)), -1, cv2.LINE_AA)
+
+    def _history_segments(self, history):
+        segments = []
+        current = []
+        previous = None
+        for point in history or []:
+            if not self._valid_court_point(point):
+                continue
+            court_point = np.array([float(point[0]), float(point[1])], dtype=np.float32)
+            if previous is not None and float(np.linalg.norm(court_point - previous)) > self.max_history_jump_m:
+                if current:
+                    segments.append(current)
+                current = []
+            current.append(court_point)
+            previous = court_point
+        if current:
+            segments.append(current)
+        return segments
+
+    def _latest_valid_court_point(self, history):
+        for point in reversed(list(history or [])):
+            if self._valid_court_point(point):
+                return point
+        return None
 
     def _draw_ball(self, frame, x, y, ball_court_position):
         if not self._valid_court_point(ball_court_position):

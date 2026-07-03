@@ -1,5 +1,15 @@
 # Good-Tennis: AI Tennis Match Analysis Assistant 🎾
 
+## Related Projects
+
+Good-Tennis, Good-Badminton, and Good-Pickleball are part of the same family of computer-vision sports video analysis projects. They share the same core ideas: player detection, ball trajectory tracking, court coordinate mapping, movement statistics, and visualized outputs. Each project adapts the court model, ball target, and sport-specific rules to a different sport.
+
+| Project | Sport | Stars |
+| --- | --- | --- |
+| [Good-Tennis](https://github.com/yo-WASSUP/Good-Tennis) | Tennis video analysis | [![Good-Tennis stars](https://img.shields.io/github/stars/yo-WASSUP/Good-Tennis?style=social)](https://github.com/yo-WASSUP/Good-Tennis/stargazers) |
+| [Good-Badminton](https://github.com/yo-WASSUP/Good-Badminton) | Badminton video analysis | [![Good-Badminton stars](https://img.shields.io/github/stars/yo-WASSUP/Good-Badminton?style=social)](https://github.com/yo-WASSUP/Good-Badminton/stargazers) |
+| [Good-Pickleball](https://github.com/yo-WASSUP/Good-Pickleball) | Pickleball video analysis | [![Good-Pickleball stars](https://img.shields.io/github/stars/yo-WASSUP/Good-Pickleball?style=social)](https://github.com/yo-WASSUP/Good-Pickleball/stargazers) |
+
 <div align="center">
 
 [![GitHub license](https://img.shields.io/github/license/yo-WASSUP/Good-Tennis)](https://github.com/yo-WASSUP/Good-Tennis/blob/main/LICENSE)
@@ -193,6 +203,15 @@ Use YOLO person detection by default:
 python main.py --video-path videos/demo.mp4 --template-path templates/demo.png --person-model weights/yolo26s.pt
 ```
 
+Enable Ultralytics built-in multi-object tracking to reduce cross-frame player box jumps:
+
+```bash
+python main.py --video-path videos/demo.mp4 --template-path templates/demo.png --person-tracker botsort
+python main.py --video-path videos/demo.mp4 --template-path templates/demo.png --person-tracker bytetrack
+```
+
+The tracker `track_id` is only a weak continuity signal for player boxes; player identity is still maintained by `upper/lower` court region and court-coordinate continuity.
+
 Switch to pose estimation:
 
 ```bash
@@ -226,6 +245,8 @@ The program uses the court template image to determine whether the current frame
 --yolo-pose-model               YOLO pose model path or model name, default weights/yolo11s-pose.pt
 --player-detector               Player detector: yolo-person or pose, default yolo-person
 --person-model                  YOLO person detection model path or model name, default weights/yolo26s.pt
+--person-tracker                YOLO person box tracker: none, botsort, bytetrack, default botsort
+--player-detect-interval        Player detection interval in frames; 1 detects every frame, use 2 or 3 for real-time preview
 --template-path                 Court template image path; opens a file picker if omitted
 --court-detection               Court corner detection mode: manual, auto, auto-fallback, default auto-fallback
 --pose-roi true|false           Show pose detection ROI box, default true

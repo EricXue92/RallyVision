@@ -2,14 +2,17 @@ import cv2
 import numpy as np
 
 from .mapper import compute_expanded_roi
+from .reference import CourtReference
 
 
 class CourtLineAutoDetector:
     """Best-effort tennis court corner detector from visible court lines."""
 
-    def __init__(self, min_line_length_ratio=0.16, min_confidence=0.72):
+    def __init__(self, min_line_length_ratio=0.16, min_confidence=0.72, min_reference_score=0.85):
         self.min_line_length_ratio = min_line_length_ratio
         self.min_confidence = min_confidence
+        self.min_reference_score = min_reference_score
+        self.court_reference = CourtReference()
         self.last_diagnostics = {
             "status": "not_run",
             "reason": None,
@@ -43,7 +46,8 @@ class CourtLineAutoDetector:
             self._set_failure("not_enough_horizontal_or_vertical_lines", line_count=len(segments), horizontal_count=len(horizontal), vertical_count=len(vertical))
             return None
 
-        model = self._select_court_model(horizontal, vertical, width, height)
+        line_support = self.court_reference.prepare_line_support(mask, (height, width))
+        model = self._select_court_model(horizontal, vertical, width, height, line_support)
         if model is None:
             self._set_failure("no_consistent_court_model", line_count=len(segments), horizontal_count=len(horizontal), vertical_count=len(vertical))
             return None
@@ -54,11 +58,16 @@ class CourtLineAutoDetector:
             self._set_failure("invalid_corner_geometry", corners=corners, line_count=len(segments), horizontal_count=len(horizontal), vertical_count=len(vertical))
             return None
 
-        confidence, details = self._score_corners(corners, width, height, len(segments), len(horizontal), len(vertical))
-        confidence = round(float(min(1.0, confidence + model["score_bonus"])), 4)
+        geometry_confidence, details = self._score_corners(corners, width, height, len(segments), len(horizontal), len(vertical))
         details["model_score"] = round(float(model["score"]), 4)
+        details.update(model.get("reference_details", {}))
+        reference_score = float(model.get("reference_score", 0.0))
+        confidence = self._combine_confidence(geometry_confidence, reference_score, model["score"])
         if confidence < self.min_confidence:
             self._set_failure("low_confidence", confidence=confidence, corners=corners, **details)
+            return None
+        if reference_score < self.min_reference_score:
+            self._set_failure("low_reference_score", confidence=confidence, corners=corners, **details)
             return None
 
         roi_corners = compute_expanded_roi(corners, image.shape)
@@ -124,7 +133,7 @@ class CourtLineAutoDetector:
         near_bottom = min(y1, y2) >= height - 1 - border
         return near_left or near_right or near_top or near_bottom
 
-    def _select_court_model(self, horizontal, vertical, width, height):
+    def _select_court_model(self, horizontal, vertical, width, height, line_support):
         best = None
         horizontal_pairs = []
         for top in horizontal:
@@ -137,9 +146,12 @@ class CourtLineAutoDetector:
                 bottom_span = self._x_span(bottom)
                 if self._span_width(top_span) < width * 0.25 or self._span_width(bottom_span) < width * 0.35:
                     continue
-                horizontal_pairs.append((top, bottom, top_span, bottom_span))
+                envelope_score = self._horizontal_envelope_score(top, bottom, horizontal, height)
+                if envelope_score < 0.18:
+                    continue
+                horizontal_pairs.append((top, bottom, top_span, bottom_span, envelope_score))
 
-        for top, bottom, top_span, bottom_span in horizontal_pairs:
+        for top, bottom, top_span, bottom_span, envelope_score in horizontal_pairs:
             for left_index, left in enumerate(vertical):
                 left_top = self._intersection(left, top)
                 left_bottom = self._intersection(left, bottom)
@@ -159,13 +171,43 @@ class CourtLineAutoDetector:
                     score = self._court_model_score(ordered, top_span, bottom_span, width, height)
                     if score <= 0:
                         continue
-                    if best is None or score > best["score"]:
+                    score *= 0.70 + 0.30 * envelope_score
+                    reference_score, reference_details = self.court_reference.score_line_support(
+                        ordered,
+                        line_support,
+                        (height, width),
+                    )
+                    combined_score = 0.30 * score + 0.60 * reference_score + 0.10 * envelope_score
+                    if best is None or combined_score > best["score"]:
                         best = {
                             "corners": ordered,
-                            "score": score,
-                            "score_bonus": min(0.10, score * 0.08),
+                            "score": combined_score,
+                            "geometry_score": score,
+                            "reference_score": reference_score,
+                            "reference_details": {
+                                **reference_details,
+                                "geometry_score": round(float(score), 4),
+                                "envelope_score": round(float(envelope_score), 4),
+                                "combined_model_score": round(float(combined_score), 4),
+                            },
                         }
         return best
+
+    def _combine_confidence(self, geometry_confidence, reference_score, model_score):
+        confidence = (
+            0.38 * float(geometry_confidence)
+            + 0.52 * float(reference_score)
+            + 0.10 * float(model_score)
+        )
+        return round(float(np.clip(confidence, 0.0, 1.0)), 4)
+
+    def _horizontal_envelope_score(self, top, bottom, horizontal, height):
+        upper_y = min(item["mid"][1] for item in horizontal)
+        lower_y = max(item["mid"][1] for item in horizontal)
+        tolerance = max(height * 0.16, 1.0)
+        top_score = 1.0 - min(1.0, abs(top["mid"][1] - upper_y) / tolerance)
+        bottom_score = 1.0 - min(1.0, abs(bottom["mid"][1] - lower_y) / tolerance)
+        return float(min(top_score, bottom_score))
 
     def _x_span(self, line):
         x1, _, x2, _ = line["points"]

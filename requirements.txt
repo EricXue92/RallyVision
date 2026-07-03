@@ -16,4 +16,4 @@ scipy>=1.7.0
 scikit-learn==1.2.2
 sktime>=0.18.0
 openpyxl>=3.0.0
-
+lap>=0.5.12

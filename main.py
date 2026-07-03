@@ -1,19 +1,35 @@
 ﻿import argparse
 import os
+from importlib.util import find_spec
 
 from tennis_analysis.system import TennisAnalysisSystem, load_runtime_dependencies
+
+
+def validate_cli_dependencies(args, parser):
+    if args.player_detector == 'yolo-person' and args.person_tracker != 'none' and find_spec('lap') is None:
+        parser.exit(
+            2,
+            "error: --person-tracker requires lap>=0.5.12.\n"
+            "Install it with one of these commands:\n"
+            "  pip install -r requirements.txt\n"
+            "  pip install \"lap>=0.5.12\"\n"
+            "Or disable MOT tracking with: --person-tracker none\n",
+        )
+
 
 def main():
     parser = argparse.ArgumentParser(description='网球比赛视频分析系统')
     parser.add_argument('--video-path', default='videos/demo.mp4', type=str, help='输入视频文件路径')
+    parser.add_argument('--template-path', default='templates/demo.png', type=str, help='球场模板图像路径；不提供时会弹出文件选择框')
     parser.add_argument('--output-dir', default=None, type=str, help='输出目录，默认 outputs/<视频文件名>')
     parser.add_argument('--ball-model', default='weights/tennis-ball.pt', type=str, help='YOLO 网球检测模型路径')
     parser.add_argument('--player-detector', default='yolo-person', choices=['pose', 'yolo-person'], help='球员检测方式：pose 使用姿态关键点，yolo-person 使用 YOLO 人框底部中点')
     parser.add_argument('--person-model', default='weights/yolo26s.pt', type=str, help='YOLO 人体目标检测模型路径或模型名，默认 weights/yolo26s.pt')
+    parser.add_argument('--person-tracker', default='botsort', choices=['none', 'botsort', 'bytetrack'], help='YOLO 人体框多目标跟踪器：none、botsort 或 bytetrack，默认 botsort')
+    parser.add_argument('--player-detect-interval', default=2, type=int, help='球员检测间隔帧数，1 表示每帧检测；实时预览可设为 2')
     parser.add_argument('--pose-family', default='rtmpose', choices=['rtmpose', 'rtmo', 'yolo-pose'], help='姿态模型族')
     parser.add_argument('--pose-mode', default='balanced', choices=['lightweight', 'balanced', 'performance'], help='RTMPose 模型档位')
     parser.add_argument('--yolo-pose-model', default='weights/yolo11s-pose.pt', type=str, help='YOLO pose 模型路径或模型名，默认 weights/yolo11s-pose.pt')
-    parser.add_argument('--template-path', default='templates/demo.png', type=str, help='球场模板图像路径；不提供时会弹出文件选择框')
     parser.add_argument('--court-detection', default='auto-fallback', choices=['manual', 'auto', 'auto-fallback'], help='球场外角点检测方式：manual 手动点击，auto 自动检测，auto-fallback 自动失败后手动')
     parser.add_argument('--pose-roi', choices=['true', 'false'], default='true', help='是否显示姿态检测 ROI 框，默认 true')
     parser.add_argument('--display', choices=['true', 'false'], default='true', help='是否显示视频窗口，默认 true')
@@ -31,6 +47,7 @@ def main():
     parser.add_argument('--audio', choices=['true', 'false'], default='true', help='是否保留原视频音频，默认 true')
     parser.add_argument('--language', default='en', choices=['zh', 'en'], help='选择界面语言 (zh/en)')
     args = parser.parse_args()
+    validate_cli_dependencies(args, parser)
 
     load_runtime_dependencies()
 
@@ -58,6 +75,8 @@ def main():
         yolo_pose_model=args.yolo_pose_model,
         player_detector=args.player_detector,
         person_model=args.person_model,
+        person_tracker=args.person_tracker,
+        player_detect_interval=args.player_detect_interval,
         show_pose_roi=args.pose_roi == 'true',
         court_detection=args.court_detection,
         show_bounce_detection=args.bounce_detection == 'true',

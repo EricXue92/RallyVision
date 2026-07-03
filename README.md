@@ -1,6 +1,17 @@
 ﻿# Good-Tennis: AI 网球鹰眼系统 🎾
 
+## 同系列项目
+
+Good-Tennis、Good-Badminton 和 Good-Pickleball 是同一类计算机视觉运动视频分析项目，核心思路都围绕球员检测、球/球路追踪、球场坐标映射、轨迹统计和可视化输出展开，只是适配的球场模型、球检测目标和运动规则不同。
+
+| 项目 | 方向 | Stars |
+| --- | --- | --- |
+| [Good-Tennis](https://github.com/yo-WASSUP/Good-Tennis) | 网球视频分析 | [![Good-Tennis stars](https://img.shields.io/github/stars/yo-WASSUP/Good-Tennis?style=social)](https://github.com/yo-WASSUP/Good-Tennis/stargazers) |
+| [Good-Badminton](https://github.com/yo-WASSUP/Good-Badminton) | 羽毛球视频分析 | [![Good-Badminton stars](https://img.shields.io/github/stars/yo-WASSUP/Good-Badminton?style=social)](https://github.com/yo-WASSUP/Good-Badminton/stargazers) |
+| [Good-Pickleball](https://github.com/yo-WASSUP/Good-Pickleball) | 匹克球视频分析 | [![Good-Pickleball stars](https://img.shields.io/github/stars/yo-WASSUP/Good-Pickleball?style=social)](https://github.com/yo-WASSUP/Good-Pickleball/stargazers) |
+
 <div align="center">
+
 [![GitHub stars](https://img.shields.io/github/stars/yo-WASSUP/Good-Tennis?style=social)](https://github.com/yo-WASSUP/Good-Tennis/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/yo-WASSUP/Good-Tennis?style=social)](https://github.com/yo-WASSUP/Good-Tennis/network/members)
 [![GitHub license](https://img.shields.io/github/license/yo-WASSUP/Good-Tennis)](https://github.com/yo-WASSUP/Good-Tennis/blob/main/LICENSE)
@@ -22,9 +33,10 @@
 
 ## 📝 更新日志
 
+- **2026-07-02**：增加球员位置追踪和自动球场外角点检测
 - **2026-06-22**：整理开源 README，增加网球弹跳点检测。
 - **当前版本**：支持球员检测、网球检测、球场坐标映射、轨迹统计、回合检测、小地图、热力图/散点图和带标注视频输出。
-- **实验功能**：自动球场外角点检测和网球弹跳点检测仍在迭代中，适合研究和二次开发使用。
+- **实验功能**：网球弹跳点检测仍在迭代中，适合研究和二次开发使用。
 
 ## 🗺️ 开发计划
 
@@ -37,6 +49,7 @@
 - [x] 标准球场小地图叠加
 - [x] 中文 / 英文可视化文字
 - [x] 热力图、散点图和检测数据导出
+- [ ] 双打支持
 - [ ] 更稳定的网球弹跳点识别
 - [ ] 更精确的网球检测模型
 - [ ] 更完整的击球点和技术动作统计
@@ -110,20 +123,6 @@ pip install torch==2.5.1+cu121 torchvision==0.20.1+cu121 --index-url https://dow
 pip install onnxruntime-gpu==1.20.1
 ```
 
-验证 GPU 是否生效：
-
-```bash
-python -c "import torch; print('torch:', torch.__version__); print('cuda:', torch.cuda.is_available()); print('gpu:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'not available')"
-python -c "import onnxruntime as ort; print(ort.__version__); print(ort.get_available_providers())"
-```
-
-期望看到：
-
-```text
-cuda: True
-CUDAExecutionProvider
-```
-
 切回 CPU 版：
 
 ```bash
@@ -176,6 +175,15 @@ python main.py --video-path videos/demo.mp4 --template-path templates/demo.png
 python main.py --video-path videos/demo.mp4 --template-path templates/demo.png --person-model weights/yolo26s.pt
 ```
 
+启用 Ultralytics 内置多目标跟踪，减少球员框跨帧跳变：
+
+```bash
+python main.py --video-path videos/demo.mp4 --template-path templates/demo.png --person-tracker botsort
+python main.py --video-path videos/demo.mp4 --template-path templates/demo.png --person-tracker bytetrack
+```
+
+跟踪器输出的 `track_id` 只作为球员框连续性的弱信号；球员身份仍以 `upper/lower` 半场和球场坐标连续性为准。
+
 切换到姿态估计：
 
 ```bash
@@ -209,6 +217,8 @@ python main.py --video-path videos/demo.mp4 --template-path templates/demo.png -
 --yolo-pose-model               YOLO pose 模型路径或模型名，默认 weights/yolo11s-pose.pt
 --player-detector               球员检测方式：yolo-person 或 pose，默认 yolo-person
 --person-model                  YOLO 人体检测模型路径或模型名，默认 weights/yolo26s.pt
+--person-tracker                YOLO 人体框跟踪器：none、botsort、bytetrack，默认 botsort
+--player-detect-interval        球员检测间隔帧数，1 表示每帧检测；实时预览可设为 2 或 3
 --template-path                 球场模板图路径；不传时会弹出文件选择框
 --court-detection               球场角点检测方式：manual、auto、auto-fallback，默认 auto-fallback
 --pose-roi true|false           是否显示姿态检测 ROI 框，默认 true

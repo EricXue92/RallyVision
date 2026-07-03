@@ -48,6 +48,18 @@ class PlayerTracker:
             "upper": 0,
             "lower": 0,
         }
+        self.region_track_ids = {
+            "upper": None,
+            "lower": None,
+        }
+        self.last_update_frame = {
+            "upper": None,
+            "lower": None,
+        }
+        self.track_id_bonus = 0.75
+        self.track_id_bonus_max_court_distance = 2.5
+        self.max_court_jump_min = 2.2
+        self.max_court_jump_speed = 12.0
 
         self.court_mapper = CourtMapper(corners)
 
@@ -56,6 +68,7 @@ class PlayerTracker:
             "image": None,
             "court": None,
             "speed": None,
+            "track_id": None,
             "hands": {
                 "left": None,
                 "right": None,
@@ -80,6 +93,22 @@ class PlayerTracker:
         if zero_is_none and float(x) == 0.0 and float(y) == 0.0:
             return None
         return [float(x), float(y)]
+
+    def _candidate_point(self, candidate):
+        if isinstance(candidate, dict):
+            return candidate.get("point")
+        return candidate
+
+    def _candidate_track_id(self, candidate):
+        if not isinstance(candidate, dict):
+            return None
+        track_id = candidate.get("track_id")
+        if track_id is None:
+            return None
+        try:
+            return int(track_id)
+        except (TypeError, ValueError):
+            return None
 
     def write_detection_record(self, frame_index, players_record, ball_image_position, detect_frame_count,
                                ball_court_position=None, bounce_event=None):
@@ -112,22 +141,28 @@ class PlayerTracker:
         upper_court_centroids = []
         lower_court_centroids = []
         for centroid in centroids:
-            if centroid[1] < self.threshold:
+            point = self._candidate_point(centroid)
+            if point is None:
+                continue
+            if point[1] < self.threshold:
                 upper_court_centroids.append(centroid)
             else:
                 lower_court_centroids.append(centroid)
 
-        upper_court_centroids = self._select_region_candidate("upper", upper_court_centroids)
-        lower_court_centroids = self._select_region_candidate("lower", lower_court_centroids)
+        upper_court_centroids = self._select_region_candidate("upper", upper_court_centroids, frame_index)
+        lower_court_centroids = self._select_region_candidate("lower", lower_court_centroids, frame_index)
 
         filtered_centroids = upper_court_centroids + lower_court_centroids
 
         for centroid in filtered_centroids:
             try:
-                region = "upper" if centroid[1] < self.threshold else "lower"
-                left_hand = left_hand_positions.get(centroid[1])
-                right_hand = right_hand_positions.get(centroid[1])
-                self._update_player_position(region, centroid, left_hand, right_hand, players_record)
+                point = self._candidate_point(centroid)
+                if point is None:
+                    continue
+                region = "upper" if point[1] < self.threshold else "lower"
+                left_hand = left_hand_positions.get(point[1])
+                right_hand = right_hand_positions.get(point[1])
+                self._update_player_position(region, centroid, left_hand, right_hand, players_record, frame_index)
             except Exception as exc:
                 print(f"Error processing player position: {exc}")
                 import traceback
@@ -143,7 +178,7 @@ class PlayerTracker:
         )
         return self.players
 
-    def _select_region_candidate(self, region, candidates):
+    def _select_region_candidate(self, region, candidates, frame_index):
         if not candidates:
             return []
 
@@ -151,33 +186,55 @@ class PlayerTracker:
         center_x = court_width / 2
         candidates_with_court = []
         for candidate in candidates:
-            court_position = self.court_mapper.image_to_court(candidate)
+            point = self._candidate_point(candidate)
+            if point is None:
+                continue
+            court_position = self.court_mapper.image_to_court(point)
             if court_position is None or len(court_position) < 2:
                 continue
             x, y = float(court_position[0]), float(court_position[1])
-            candidates_with_court.append((candidate, x, y))
+            candidates_with_court.append({
+                "candidate": candidate,
+                "point": point,
+                "x": x,
+                "y": y,
+                "track_id": self._candidate_track_id(candidate),
+            })
 
         if candidates_with_court:
+            plausible_candidates = [
+                item for item in candidates_with_court
+                if self._is_plausible_court_movement(region, item["x"], item["y"], frame_index)
+            ]
+            if plausible_candidates:
+                candidates_with_court = plausible_candidates
+            elif self._last_court_position(region) is not None:
+                return []
+
             strict_candidates = [
                 item for item in candidates_with_court
-                if self._is_valid_player_court_position(region, item[1], item[2], strict=True)
+                if self._is_valid_player_court_position(region, item["x"], item["y"], strict=True)
             ]
             scored_candidates = strict_candidates
             if not scored_candidates:
                 scored_candidates = [
                     item for item in candidates_with_court
-                    if self._is_valid_player_court_position(region, item[1], item[2], strict=False)
-                    and self._is_close_to_previous_court_position(region, item[1], item[2])
+                    if self._is_valid_player_court_position(region, item["x"], item["y"], strict=False)
+                    and self._is_close_to_previous_court_position(region, item["x"], item["y"])
                 ]
             if scored_candidates:
                 scored_candidates.sort(key=lambda item: self._candidate_score(region, item, center_x, court_length))
-                return [scored_candidates[0][0]]
+                return [scored_candidates[0]["candidate"]]
             return []
 
         if region == "upper":
-            candidates = sorted(candidates, key=lambda p: -p[1])
+            candidates = [candidate for candidate in candidates if self._candidate_point(candidate) is not None]
+            candidates = sorted(candidates, key=lambda p: -self._candidate_point(p)[1])
         else:
-            candidates = sorted(candidates, key=lambda p: -p[1])
+            candidates = [candidate for candidate in candidates if self._candidate_point(candidate) is not None]
+            candidates = sorted(candidates, key=lambda p: -self._candidate_point(p)[1])
+        if not candidates:
+            return []
         return [candidates[0]]
 
     def _is_valid_player_court_position(self, region, x, y, strict=True):
@@ -191,7 +248,9 @@ class PlayerTracker:
         return net_y - self.net_margin <= y <= TENNIS_COURT_LENGTH + self.baseline_margin
 
     def _candidate_score(self, region, item, center_x, court_length):
-        candidate, x, y = item
+        point = item["point"]
+        x = item["x"]
+        y = item["y"]
         net_y = court_length / 2
         expected_y = 0.0 if region == "upper" else court_length
         score = 0.0
@@ -207,12 +266,19 @@ class PlayerTracker:
         score += outside_x * 8.0
 
         previous_court = self._last_court_position(region)
+        previous_court_distance = None
         if previous_court is not None:
-            score += float(np.linalg.norm(np.array([x, y]) - previous_court)) * 0.8
+            previous_court_distance = float(np.linalg.norm(np.array([x, y]) - previous_court))
+            score += previous_court_distance * 0.8
 
         previous_image = self.players.get(region)
         if previous_image is not None:
-            score += float(np.linalg.norm(np.array(candidate, dtype=np.float32) - np.array(previous_image, dtype=np.float32))) * 0.01
+            score += float(np.linalg.norm(np.array(point, dtype=np.float32) - np.array(previous_image, dtype=np.float32))) * 0.01
+
+        preferred_track_id = self.region_track_ids.get(region)
+        if preferred_track_id is not None and item["track_id"] == preferred_track_id:
+            if previous_court_distance is None or previous_court_distance <= self.track_id_bonus_max_court_distance:
+                score -= self.track_id_bonus
 
         return score
 
@@ -231,17 +297,41 @@ class PlayerTracker:
         distance = float(np.linalg.norm(np.array([x, y], dtype=np.float32) - previous_court))
         return distance <= 3.0
 
-    def _update_player_position(self, region, centroid, left_hand_pos, right_hand_pos, players_record):
-        self.players[region] = centroid
-        self.history[region].append(centroid)
+    def _is_plausible_court_movement(self, region, x, y, frame_index):
+        previous_court = self._last_court_position(region)
+        if previous_court is None:
+            return True
 
-        court_position = self.court_mapper.image_to_court(centroid)
+        distance = float(np.linalg.norm(np.array([x, y], dtype=np.float32) - previous_court))
+        previous_frame = self.last_update_frame.get(region)
+        if previous_frame is None or self.fps <= 0:
+            max_allowed = self.max_court_jump_min
+        else:
+            elapsed_sec = max(1, int(frame_index) - int(previous_frame)) / self.fps
+            max_allowed = max(self.max_court_jump_min, self.max_court_jump_speed * elapsed_sec + 0.8)
+        return distance <= max_allowed
+
+    def _update_player_position(self, region, centroid, left_hand_pos, right_hand_pos, players_record, frame_index):
+        point = self._candidate_point(centroid)
+        if point is None:
+            return
+
+        track_id = self._candidate_track_id(centroid)
+        if track_id is not None:
+            self.region_track_ids[region] = track_id
+
+        self.players[region] = point
+        self.history[region].append(point)
+
+        court_position = self.court_mapper.image_to_court(point)
         self.court_history[region].append(court_position)
+        self.last_update_frame[region] = int(frame_index)
 
         player_record = players_record[region]
-        player_record["image"] = self._point_or_none(centroid)
+        player_record["image"] = self._point_or_none(point)
         player_record["court"] = self._point_or_none(court_position)
         player_record["speed"] = float(self.current_speed[region])
+        player_record["track_id"] = track_id
         if left_hand_pos:
             player_record["hands"]["left"] = self._point_or_none(left_hand_pos)
         if right_hand_pos:
