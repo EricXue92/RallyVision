@@ -15,6 +15,7 @@ def load_runtime_dependencies():
     global PlayerPoseVisualizer, StatsVisualizer, RTMPoseProcessor, YOLOPoseProcessor, YOLOPersonDetector, vap
     global JsonlDetectionWriter, write_json, SCHEMA_VERSION
     global CourtKeypointDetector, COURT_KEYPOINTS_M, CameraModel
+    global median_keypoints_over_frames, keypoints_drifted
     global compute_shot_metrics_entries, write_shot_metrics, call_bounce
     global TrackNetBallDetector, TrackNetBallTrackerAdapter
 
@@ -46,6 +47,8 @@ def load_runtime_dependencies():
         from .court.keypoint_detector import CourtKeypointDetector as _CourtKeypointDetector
         from .court.keypoint_detector import COURT_KEYPOINTS_M as _COURT_KEYPOINTS_M
         from .court.camera import CameraModel as _CameraModel
+        from .court.camera_calibration import median_keypoints_over_frames as _median_keypoints_over_frames
+        from .court.camera_calibration import keypoints_drifted as _keypoints_drifted
         from .analysis.shot_pipeline import compute_shot_metrics_entries as _compute_shot_metrics_entries
         from .analysis.shot_pipeline import write_shot_metrics as _write_shot_metrics
         from .analysis.line_call import call_bounce as _call_bounce
@@ -89,6 +92,8 @@ def load_runtime_dependencies():
     CourtKeypointDetector = _CourtKeypointDetector
     COURT_KEYPOINTS_M = _COURT_KEYPOINTS_M
     CameraModel = _CameraModel
+    median_keypoints_over_frames = _median_keypoints_over_frames
+    keypoints_drifted = _keypoints_drifted
     compute_shot_metrics_entries = _compute_shot_metrics_entries
     write_shot_metrics = _write_shot_metrics
     call_bounce = _call_bounce
@@ -251,6 +256,7 @@ class TennisAnalysisSystem:
 
         self.frame_width = 0
         self.frame_height = 0
+        self.total_frames = 0
         self.bounce_detector = None
         self.court_detection_result = None
     def process_video(self):
@@ -269,7 +275,8 @@ class TennisAnalysisSystem:
         
 
         self.fps = fps
-        
+        self.total_frames = total_frames
+
 
         template_path = self._get_template_path()
         template_gray, template_color = self._load_template(template_path, cap)
@@ -848,10 +855,10 @@ class TennisAnalysisSystem:
             print("提示：--line-call off，跳过弹跳判罚 / Notice: --line-call off, skipping bounce line calling")
 
         shot_metrics_entries = []
-        camera = None
+        camera_dict = None
         if self.enable_shot_metrics:
             rallies = self._split_records_into_rallies(records)
-            camera = self._calibrate_camera(rallies)
+            camera_spans, recalibrated_at_frames = self._calibrate_camera()
 
             points_by_frame = {
                 int(point.frame): {
@@ -875,6 +882,10 @@ class TennisAnalysisSystem:
                         f"跳过该方击球分析 / Warning: no player position data for '{side}' side in "
                         f"rally frames {rally['start']}-{rally['end']}, skipping that side's shots"
                     )
+                # R12：一个回合可能横跨标定 span 边界（罕见——漂移重标定发生在回合中间），
+                # 用回合中点帧去查该回合该用哪一段相机标定。
+                rally_mid_frame = (rally["start"] + rally["end"]) // 2
+                camera = self._camera_for_frame(camera_spans, rally_mid_frame)
                 entries = compute_shot_metrics_entries(
                     rally_points, rally_bounces, resolved_positions, self.fps, camera, self.line_call_mode
                 )
@@ -884,10 +895,15 @@ class TennisAnalysisSystem:
 
             write_shot_metrics(self.shot_metrics_path, shot_metrics_entries)
             print(f"击球指标计算完成: {len(shot_metrics_entries)} 拍，结果={self.shot_metrics_path}")
+
+            if camera_spans:
+                # R12：metadata.json 的 camera 只存最后一段标定（+完整的重标定帧号列表）。
+                camera_dict = camera_spans[-1]["camera"].to_dict()
+                camera_dict["recalibrated_at_frames"] = recalibrated_at_frames
         else:
             print("提示：--shot-metrics false，跳过击球速度/旋转分析 / Notice: --shot-metrics false, skipping shot speed/spin analysis")
 
-        self.camera_dict = camera.to_dict() if camera is not None else None
+        self.camera_dict = camera_dict
         return shot_metrics_entries, bounce_line_calls
 
     def _load_detection_records(self):
@@ -972,10 +988,35 @@ class TennisAnalysisSystem:
             resolved[side] = value
         return resolved, missing
 
-    def _calibrate_camera(self, rallies):
-        """CourtKeypointDetector 检测（回合中点采样，最多 5 帧）+ CameraModel.calibrate；
-        权重缺失 / 有效关键点 < 6 / 重投影误差 > 15px / --court-calibration homography
-        任一命中都降级为 homography-only（返回 None，shot_metrics 只保留 line_call）。
+    # 固定机位标定：视频前 CAMERA_INITIAL_SAMPLE_FRAMES 帧，每 CAMERA_INITIAL_SAMPLE_STEP
+    # 帧抽 1 帧检测 -> 逐点中位数 -> CameraModel.calibrate，整段视频复用。
+    CAMERA_INITIAL_SAMPLE_FRAMES = 300
+    CAMERA_INITIAL_SAMPLE_STEP = 10
+    # 某关键点在采样帧中有效（非 NaN）次数 < 此值 -> 该点整体判无效（见 camera_calibration.py）。
+    CAMERA_KEYPOINT_MIN_VALID_SAMPLES = 3
+    CAMERA_MIN_VALID_KEYPOINTS = 6
+    CAMERA_MAX_REPROJECTION_ERROR_PX = 15.0
+    # 漂移守卫：标定完成后每 CAMERA_DRIFT_CHECK_INTERVAL_FRAMES（约 30s@30fps）帧重检 1 帧；
+    # 命中漂移则用其后 CAMERA_RECALIBRATION_WINDOW_FRAMES 帧（同样每 10 帧抽 1 帧）重新标定。
+    CAMERA_DRIFT_CHECK_INTERVAL_FRAMES = 900
+    CAMERA_DRIFT_THRESHOLD_PX = 10.0
+    CAMERA_DRIFT_MIN_KEYPOINTS = 4
+    CAMERA_RECALIBRATION_WINDOW_FRAMES = 300
+
+    def _calibrate_camera(self):
+        """固定机位相机标定 + 漂移守卫（Task 10 amended brief）。
+
+        权重缺失 / --court-calibration homography 任一命中，或初始标定失败（关键点检测
+        全军覆没 / 有效关键点 < 6 / 重投影误差 > 15px），整体降级为 homography-only：
+        返回 ([], [])，shot_metrics 只保留 line_call。
+
+        标定成功后，返回 (spans, recalibrated_at_frames)：
+            spans: 按帧区间排序的 [{"start_frame", "end_frame", "camera"}, ...]，
+                元素之间首尾相接覆盖 [1, total_frames]（1-indexed，与 detections.jsonl /
+                rally["start"]/["end"] 的 frame 计数一致，见 _process_frame 的
+                `frame_count += 1`）；漂移守卫每命中一次就在此追加一段。
+            recalibrated_at_frames: 实际触发了重标定（且重标定成功）的帧号列表（1-indexed）；
+                未发生漂移重标定时为空列表。
         """
         if self.court_calibration == 'homography':
             print(
@@ -983,7 +1024,7 @@ class TennisAnalysisSystem:
                 "Notice: --court-calibration homography forces homography-only degrade, "
                 "skipping camera calibration"
             )
-            return None
+            return [], []
 
         if not os.path.exists(self.keypoint_model_path):
             print(
@@ -991,44 +1032,100 @@ class TennisAnalysisSystem:
                 f"Warning: court keypoint weights missing ({self.keypoint_model_path}), "
                 "degrading to homography-only mode"
             )
-            return None
+            return [], []
 
-        if not rallies:
-            print("提示：未检测到有效回合，跳过相机标定 / Notice: no valid rallies detected, skipping camera calibration")
-            return None
-
-        sample_rallies = rallies if len(rallies) <= 5 else [
-            rallies[index] for index in np.linspace(0, len(rallies) - 1, 5).round().astype(int)
-        ]
+        if self.total_frames <= 0:
+            print("提示：视频无有效帧，跳过相机标定 / Notice: video has no frames, skipping camera calibration")
+            return [], []
 
         detector = CourtKeypointDetector(self.keypoint_model_path)
         cap = cv2.VideoCapture(self.video_path)
-        detections = []
         try:
-            for rally in sample_rallies:
-                midpoint_frame = (rally["start"] + rally["end"]) // 2
-                cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, midpoint_frame - 1))  # frame 计数 1-indexed
+            initial_detections = self._sample_keypoint_detections(
+                cap, detector, start_frame=1,
+                span_frames=self.CAMERA_INITIAL_SAMPLE_FRAMES, step=self.CAMERA_INITIAL_SAMPLE_STEP,
+            )
+            if not initial_detections:
+                print(
+                    "警告：关键点检测在所有采样帧均失败，降级为单应性模式 / "
+                    "Warning: keypoint detection failed on all sampled frames, degrading to homography-only mode"
+                )
+                return [], []
+
+            baseline_median, baseline_mask = median_keypoints_over_frames(
+                initial_detections, min_valid_frames=self.CAMERA_KEYPOINT_MIN_VALID_SAMPLES
+            )
+            camera = self._try_calibrate_from_median(baseline_median, baseline_mask)
+            if camera is None:
+                return [], []
+
+            spans = [{"start_frame": 1, "end_frame": self.total_frames, "camera": camera}]
+            recalibrated_at_frames = []
+
+            next_check = 1 + self.CAMERA_DRIFT_CHECK_INTERVAL_FRAMES
+            while next_check <= self.total_frames:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, next_check - 1)  # POS_FRAMES 是 0-indexed
                 ret, frame = cap.read()
-                if not ret:
-                    continue
-                points = detector.detect(frame)
-                if points is not None:
-                    detections.append(points)
+                if ret:
+                    current_points = detector.detect(frame)
+                    if current_points is not None and keypoints_drifted(
+                        current_points, baseline_median, baseline_mask,
+                        threshold_px=self.CAMERA_DRIFT_THRESHOLD_PX,
+                        min_keypoints=self.CAMERA_DRIFT_MIN_KEYPOINTS,
+                    ):
+                        print(
+                            f"警告：检测到第 {next_check} 帧附近相机可能被碰动，正在用其后 "
+                            f"{self.CAMERA_RECALIBRATION_WINDOW_FRAMES} 帧重新标定 / "
+                            f"Warning: possible camera bump detected near frame {next_check}, "
+                            f"recalibrating using the next {self.CAMERA_RECALIBRATION_WINDOW_FRAMES} frames"
+                        )
+                        recal_detections = self._sample_keypoint_detections(
+                            cap, detector, start_frame=next_check,
+                            span_frames=self.CAMERA_RECALIBRATION_WINDOW_FRAMES,
+                            step=self.CAMERA_INITIAL_SAMPLE_STEP,
+                        )
+                        new_camera = None
+                        if recal_detections:
+                            new_median, new_mask = median_keypoints_over_frames(
+                                recal_detections, min_valid_frames=self.CAMERA_KEYPOINT_MIN_VALID_SAMPLES
+                            )
+                            new_camera = self._try_calibrate_from_median(new_median, new_mask)
+                        if new_camera is not None:
+                            spans[-1]["end_frame"] = next_check - 1
+                            spans.append({"start_frame": next_check, "end_frame": self.total_frames, "camera": new_camera})
+                            recalibrated_at_frames.append(int(next_check))
+                            baseline_median, baseline_mask = new_median, new_mask
+                        else:
+                            print(
+                                "警告：重标定失败，继续沿用上一段相机标定 / "
+                                "Warning: recalibration failed, continuing with the previous camera calibration"
+                            )
+                next_check += self.CAMERA_DRIFT_CHECK_INTERVAL_FRAMES
+
+            return spans, recalibrated_at_frames
         finally:
             cap.release()
 
-        if not detections:
-            print(
-                "警告：关键点检测在所有采样帧均失败，降级为单应性模式 / "
-                "Warning: keypoint detection failed on all sampled frames, degrading to homography-only mode"
-            )
-            return None
+    def _sample_keypoint_detections(self, cap, detector, start_frame, span_frames, step):
+        """在 1-indexed 帧号区间 [start_frame, min(start_frame+span_frames-1, total_frames)]
+        内每 step 帧抽 1 帧跑关键点检测，返回检测结果不为 None 的 np.ndarray[14,2] 列表
+        （复用同一个 cap；cv2.CAP_PROP_POS_FRAMES 是 0-indexed，故 seek 时 -1）。"""
+        detections = []
+        end_frame_inclusive = min(start_frame + span_frames - 1, self.total_frames)
+        for frame_index in range(start_frame, end_frame_inclusive + 1, step):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index - 1)
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            points = detector.detect(frame)
+            if points is not None:
+                detections.append(points)
+        return detections
 
-        stacked = np.stack(detections, axis=0)
-        median_points = np.nanmedian(stacked, axis=0)
-        valid_mask = ~np.isnan(median_points).any(axis=1)
+    def _try_calibrate_from_median(self, median_points, valid_mask):
+        """有效关键点 < 6 或重投影误差 > 15px 时打印双语警告并返回 None（调用方按此降级）。"""
         valid_count = int(valid_mask.sum())
-        if valid_count < 6:
+        if valid_count < self.CAMERA_MIN_VALID_KEYPOINTS:
             print(
                 f"警告：有效关键点仅 {valid_count} 个（<6），降级为单应性模式 / "
                 f"Warning: only {valid_count} valid keypoints (<6), degrading to homography-only mode"
@@ -1039,7 +1136,7 @@ class TennisAnalysisSystem:
         world_points = COURT_KEYPOINTS_M[valid_mask]
         camera = CameraModel.calibrate(image_points, world_points, (self.frame_width, self.frame_height))
         error = camera.reprojection_error(image_points, world_points)
-        if error > 15.0:
+        if error > self.CAMERA_MAX_REPROJECTION_ERROR_PX:
             print(
                 f"警告：重投影误差 {error:.1f}px > 15px，降级为单应性模式 / "
                 f"Warning: reprojection error {error:.1f}px > 15px, degrading to homography-only mode"
@@ -1051,6 +1148,15 @@ class TennisAnalysisSystem:
             f"Camera calibrated: {valid_count} keypoints, reprojection error {error:.2f}px"
         )
         return camera
+
+    @staticmethod
+    def _camera_for_frame(spans, frame):
+        """R12：一个回合可能横跨标定 span 边界，用该回合的代表帧（调用方传中点帧）
+        查找覆盖它的 CameraModel；spans 为空（完全降级）时返回 None。"""
+        for span in spans:
+            if span["start_frame"] <= frame <= span["end_frame"]:
+                return span["camera"]
+        return spans[-1]["camera"] if spans else None
 
     def _patch_metadata_with_camera(self, camera_dict):
         if not os.path.exists(self.metadata_path):
