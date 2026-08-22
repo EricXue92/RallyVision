@@ -60,6 +60,8 @@ def test_edit_point_replays_everything_downstream():
     # 与从头手工推演的期望局面完全一致
     ms.edit_point(0, new_winner=1)
     assert len(ms.history) == 20
+    # 手工推演独立核验（不依赖重放路径本身，防「两边共享同一个 bug 仍互相一致」）
+    assert (ms.points, ms.games, ms.sets) == ([3, 4], [3, 0], [])
     # 重放正确性：用相同 history 从头喂一个新状态机，全状态一致
     replay = MatchState()
     for rec in ms.history:
