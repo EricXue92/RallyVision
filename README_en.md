@@ -21,9 +21,10 @@ Built upon [Good-Tennis](https://github.com/yo-WASSUP/Good-Tennis) (Apache 2.0)
 ## 📝 Changelog
 
 - **2026-08-22**: Phase-2 capabilities shipped — fixed-camera calibration (`--court-calibration`), shot speed/spin estimation (`--shot-metrics`), bounce IN/OUT line calling (`--line-call`), a new WASB-SBDT ball-detection backend (`--ball-detector wasb`, alongside yolo/tracknet), and a real-data speed validation tool `tools/validate_speed.py`.
+- **2026-07-02**: Added player position tracking and automatic court outer-corner detection.
 - **2026-06-22**: Organized the open-source README and added tennis ball bounce detection.
-- **Current version**: Supports player detection, tennis ball detection, court coordinate mapping, trajectory statistics, rally detection, mini-map overlays, heatmaps/scatter plots, and annotated video output.
-- **Experimental features**: Automatic outer court corner detection and tennis ball bounce detection are still being improved, and are suitable for research and further development.
+- **Current version**: Supports player detection, tennis ball detection, court coordinate mapping, trajectory statistics, rally detection, mini-map overlays, heatmaps/scatter plots, annotated video output, plus camera calibration, shot speed/spin estimation, and bounce IN/OUT line calling.
+- **In progress**: Bounce detection now includes dual-parabola sub-frame refinement; the current focus is real-video speed-fit accuracy (see the known accuracy status in "Shot Speed/Spin Accuracy and Validation").
 
 ## 🗺️ Roadmap
 
@@ -304,8 +305,17 @@ A diagnostic pass was run on the repo's own `videos/demo.mp4` (an amateur traini
 
 ```json
 [
-  {"video": "videos/serve_01.mp4", "hit_frame_approx": 142, "caption_kmh": 187},
-  {"video": "videos/serve_02.mp4", "hit_frame_approx": 88, "caption_kmh": 201, "label": "Alcaraz ace"}
+  {
+    "video": "videos/serve_01.mp4",
+    "hit_frame_approx": 142,
+    "caption_kmh": 187
+  },
+  {
+    "video": "videos/serve_02.mp4",
+    "hit_frame_approx": 88,
+    "caption_kmh": 201,
+    "label": "Alcaraz ace"
+  }
 ]
 ```
 

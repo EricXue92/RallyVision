@@ -25,8 +25,27 @@
 - **2026-08-22**：阶段二能力上线——固定机位相机标定（`--court-calibration`）、击球速度/旋转估计（`--shot-metrics`）、弹跳点 IN/OUT 判罚（`--line-call`）、新增 WASB-SBDT 球检测后端（`--ball-detector wasb`，与 yolo/tracknet 三选一），并提供真实数据球速验证工具 `tools/validate_speed.py`。
 - **2026-07-02**：增加球员位置追踪和自动球场外角点检测
 - **2026-06-22**：整理开源 README，增加网球弹跳点检测。
-- **当前版本**：支持球员检测、网球检测、球场坐标映射、轨迹统计、回合检测、小地图、热力图/散点图和带标注视频输出。
-- **实验功能**：网球弹跳点检测仍在迭代中，适合研究和二次开发使用。
+- **当前版本**：支持球员检测、网球检测、球场坐标映射、轨迹统计、回合检测、小地图、热力图/散点图、带标注视频输出，以及相机标定、击球速度/旋转估计与落点 IN/OUT 判罚。
+- **迭代中**：弹跳检测已含双抛物线亚帧精化；当前重点是真实视频上的球速拟合精度（详见「击球速度/旋转精度与验证」章节的已知精度状态）。
+
+## 🗺️ 路线图
+
+- [x] 逐帧网球比赛视频分析
+- [x] YOLO 人体检测与多种姿态模型可选
+- [x] YOLO 网球检测集成
+- [x] 手动/自动球场标注与球场坐标映射
+- [x] 球员移动轨迹、速度、距离与回合统计
+- [x] 网球轨迹与弹跳点标注
+- [x] 标准网球场小地图叠加
+- [x] 中/英文可视化文案
+- [x] 热力图、散点图与检测数据导出
+- [x] 固定机位相机标定（含漂移检测与自动重标定）
+- [x] 基于 3D 弹道拟合的击球速度与旋转估计
+- [x] 弹跳点 IN/OUT 判罚
+- [x] 更多球检测后端（TrackNet、WASB-SBDT）
+- [x] 真实数据验证工具（`tools/validate_speed.py`）
+- [ ] 更稳定的网球弹跳点识别
+- [ ] 更准确的网球检测模型
 
 ---
 
@@ -249,8 +268,17 @@ uv run main.py --video-path videos/demo.mp4 --template-path templates/demo.png -
 
 ```json
 [
-  {"video": "videos/serve_01.mp4", "hit_frame_approx": 142, "caption_kmh": 187},
-  {"video": "videos/serve_02.mp4", "hit_frame_approx": 88, "caption_kmh": 201, "label": "Alcaraz ace"}
+  {
+    "video": "videos/serve_01.mp4",
+    "hit_frame_approx": 142,
+    "caption_kmh": 187
+  },
+  {
+    "video": "videos/serve_02.mp4",
+    "hit_frame_approx": 88,
+    "caption_kmh": 201,
+    "label": "Alcaraz ace"
+  }
 ]
 ```
 
