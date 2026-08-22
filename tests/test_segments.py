@@ -86,3 +86,42 @@ def test_refine_bounce_falls_back_when_sparse():
     pts = _v_shape_points()[13:18]          # 前后凑不齐 3 帧
     t_sub, court_xy = refine_bounce(pts, bounce_frame=40)
     assert t_sub == 40.0                     # 原样返回，不抛异常
+
+
+def _mk_points_with_bounce_refinement():
+    # 复用 _mk_points 的 court 轨迹（保证候选击球帧/弹跳配对逻辑不变），
+    # 但覆盖 image 数据：frame 40 弹跳附近做出 V 形亚帧谷底（vertex=40.3，
+    # 手法同 _v_shape_points），frame 80 弹跳附近的 post 侧只留 1 个有效帧
+    # （<3，触发 refine_bounce 内部退化分支）。
+    pts = _mk_points()
+    vertex = 40.3
+    for f in range(32, 49):
+        img_y = 500 + (12 * (vertex - f) if f < vertex else 9 * (f - vertex))
+        pts[f]["image"] = [640.0, img_y]
+    for f in range(81, 89):
+        pts[f]["image"] = None
+    return pts
+
+
+def test_extract_segments_wires_refine_bounce_into_bounce_court_xy():
+    # 关键回归：验证 extract_segments 真的把每个弹跳事件送去 refine_bounce 精化，
+    # 而不是仍然原样透传弹跳事件自带的 court 坐标（BOUNCES 里的值是刻意错开的，
+    # 若接线被静默改回旧行为，这里会拿到 [5.5, 4.2]/[5.5, 20.8] 而非精化值）。
+    pts = _mk_points_with_bounce_refinement()
+    segs = extract_segments(pts, BOUNCES, PLAYERS, fps=60.0)
+    assert len(segs) == 2
+
+    # 已知值校验（由 refine_bounce 对同一输入直接算出，见 task-5b-report.md）：
+    # t_sub≈40.112099，court y≈4.047642。与 BOUNCES[0] 的原始 [5.5, 4.2] 明显不同。
+    bounce1_xy = segs[0].bounce_court_xy
+    assert bounce1_xy[0] == 5.5
+    assert abs(bounce1_xy[1] - 4.047642075) < 1e-6
+    assert bounce1_xy != list(BOUNCES[0]["court"])
+
+    # 退化路径（frame 80 邻域 image 数据不足 3 帧）：refine_bounce 内部回退到整数帧，
+    # 按轨迹在该整数帧的 court 插值（[5.5, 21.0]），仍然通过 extract_segments 正常
+    # 流出、不抛异常——同样不等于弹跳事件原始 court [5.5, 20.8]。
+    bounce2_xy = segs[1].bounce_court_xy
+    assert bounce2_xy[0] == 5.5
+    assert abs(bounce2_xy[1] - 21.0) < 1e-9
+    assert bounce2_xy != list(BOUNCES[1]["court"])

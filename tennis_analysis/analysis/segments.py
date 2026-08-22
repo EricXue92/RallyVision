@@ -85,6 +85,9 @@ def extract_segments(points, bounce_events, player_positions, fps) -> list:
         except ValueError:
             # 邻域内没有任何有效 court 坐标可插值（court_pts 为空）时 np.interp 会
             # 抛异常；此时精化不可用，退回弹跳事件自带的原始 court 坐标。
+            # 注：在当前调用点这条分支实际不可达——points 全员 court=None 时
+            # y 全 NaN，_find_candidate_hits 已在本函数更早处返回 []，走不到这里；
+            # 保留是防将来重构（如调用参数改传子集 points）悄悄打破这个前提。
             refined_bounce_xy = None
 
         segments.append(
