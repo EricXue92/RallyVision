@@ -1,23 +1,12 @@
-﻿# Good-Tennis: AI 网球鹰眼系统 🎾
-
-## 同系列项目
-
-Good-Tennis、Good-Badminton 和 Good-Pickleball 是同一类计算机视觉运动视频分析项目，核心思路都围绕球员检测、球/球路追踪、球场坐标映射、轨迹统计和可视化输出展开，只是适配的球场模型、球检测目标和运动规则不同。
-
-| 项目 | 方向 | Stars |
-| --- | --- | --- |
-| [Good-Tennis](https://github.com/yo-WASSUP/Good-Tennis) | 网球视频分析 | [![Good-Tennis stars](https://img.shields.io/github/stars/yo-WASSUP/Good-Tennis?style=social)](https://github.com/yo-WASSUP/Good-Tennis/stargazers) |
-| [Good-Badminton](https://github.com/yo-WASSUP/Good-Badminton) | 羽毛球视频分析 | [![Good-Badminton stars](https://img.shields.io/github/stars/yo-WASSUP/Good-Badminton?style=social)](https://github.com/yo-WASSUP/Good-Badminton/stargazers) |
-| [Good-Pickleball](https://github.com/yo-WASSUP/Good-Pickleball) | 匹克球视频分析 | [![Good-Pickleball stars](https://img.shields.io/github/stars/yo-WASSUP/Good-Pickleball?style=social)](https://github.com/yo-WASSUP/Good-Pickleball/stargazers) |
+﻿# RallyVision: AI 网球鹰眼系统 🎾
 
 <div align="center">
 
-[![GitHub stars](https://img.shields.io/github/stars/yo-WASSUP/Good-Tennis?style=social)](https://github.com/yo-WASSUP/Good-Tennis/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/yo-WASSUP/Good-Tennis?style=social)](https://github.com/yo-WASSUP/Good-Tennis/network/members)
-[![GitHub license](https://img.shields.io/github/license/yo-WASSUP/Good-Tennis)](https://github.com/yo-WASSUP/Good-Tennis/blob/main/LICENSE)
-[![RedNote](https://img.shields.io/badge/RedNote-ff2442)](https://www.xiaohongshu.com/explore/6a391e2b000000000f01581b?xsec_token=ABnkAYwLXp33yPqesFN0qD6et7zwd6U5Mrak-XpA5tOXs=&xsec_source=pc_user)
+[![GitHub license](https://img.shields.io/github/license/EricXue92/RallyVision)](https://github.com/EricXue92/RallyVision/blob/main/LICENSE)
 
 **基于计算机视觉的网球比赛视频分析工具**
+
+本项目基于 [Good-Tennis](https://github.com/yo-WASSUP/Good-Tennis)（Apache 2.0）发展而来
 
 [中文](README.md) | [English](README_en.md)
 
@@ -25,8 +14,8 @@ Good-Tennis、Good-Badminton 和 Good-Pickleball 是同一类计算机视觉运�
 
 ### 🎬 视频分析结果
 
-| RTMPose 姿态检测 | YOLO26s 人体检测 |
-| --- | --- |
+| RTMPose 姿态检测                                        | YOLO26s 人体检测                                        |
+| ------------------------------------------------------- | ------------------------------------------------------- |
 | ![RTMPose 姿态检测演示](assets/rtmpose_detect_demo.gif) | ![YOLO26s 人体检测演示](assets/yolo26s_detect_demo.gif) |
 
 网球比赛远景里球员通常较小，目标检测一般比姿态估计更稳定。
@@ -71,39 +60,28 @@ Good-Tennis、Good-Badminton 和 Good-Pickleball 是同一类计算机视觉运�
 - **中英文显示** - 可通过 `--language zh/en` 切换可视化文字。
 - **本地运行** - 视频、模型和分析结果都保存在本地。
 
-
 ### 📊 球场与位置可视化
 
-| 自动球场检测 | 球员位置热力图 | 球员位置散点图 |
-| --- | --- | --- |
+| 自动球场检测                     | 球员位置热力图                             | 球员位置散点图                             |
+| -------------------------------- | ------------------------------------------ | ------------------------------------------ |
 | ![自动球场检测](assets/auto.png) | ![球员位置热力图](assets/demo_heatmap.png) | ![球员位置散点图](assets/demo_scatter.png) |
 
 ## 🧩 系统要求
 
-- Python 3.8+
+- [uv](https://docs.astral.sh/uv/)（自动管理 Python 版本和依赖）
 - FFmpeg，并已加入系统 `PATH`
 - OpenCV / PyTorch / Ultralytics / RTMLib / ONNX Runtime
 - 推荐 NVIDIA GPU；CPU 可以运行，但视频分析速度会明显变慢
 
 ## ⚙️ 安装指南
 
-### Windows
+本项目使用 [uv](https://docs.astral.sh/uv/getting-started/installation/) 管理依赖。安装 uv 后，在项目根目录执行：
 
 ```bash
-python -m venv .venv
-.\.venv\Scripts\activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+uv sync
 ```
 
-### Linux / macOS
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-```
+uv 会自动下载合适的 Python 版本、创建 `.venv` 并安装全部依赖（Windows / Linux / macOS 通用）。
 
 ### GPU 加速（Windows / NVIDIA）
 
@@ -116,17 +94,15 @@ pip install -r requirements.txt
 PowerShell：
 
 ```bash
-.\.venv\Scripts\activate
-
-pip uninstall -y torch torchvision onnxruntime
-pip install torch==2.5.1+cu121 torchvision==0.20.1+cu121 --index-url https://download.pytorch.org/whl/cu121
-pip install onnxruntime-gpu==1.20.1
+uv pip uninstall torch torchvision onnxruntime
+uv pip install torch==2.5.1+cu121 torchvision==0.20.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+uv pip install onnxruntime-gpu==1.20.1
 ```
 
 切回 CPU 版：
 
 ```bash
-pip install --force-reinstall -r requirements.txt
+uv sync --reinstall
 ```
 
 ## 🧠 模型准备
@@ -155,7 +131,7 @@ https://github.com/yo-WASSUP/Good-Tennis/releases/latest
 2. 运行基础命令：
 
 ```bash
-python main.py --video-path videos/demo.mp4 --template-path templates/demo.png
+uv run main.py --video-path videos/demo.mp4 --template-path templates/demo.png
 ```
 
 3. 程序会先尝试自动检测网球双打场地四个外角点。
@@ -172,14 +148,14 @@ python main.py --video-path videos/demo.mp4 --template-path templates/demo.png
 默认使用 YOLO 人体框检测：
 
 ```bash
-python main.py --video-path videos/demo.mp4 --template-path templates/demo.png --person-model weights/yolo26s.pt
+uv run main.py --video-path videos/demo.mp4 --template-path templates/demo.png --person-model weights/yolo26s.pt
 ```
 
 启用 Ultralytics 内置多目标跟踪，减少球员框跨帧跳变：
 
 ```bash
-python main.py --video-path videos/demo.mp4 --template-path templates/demo.png --person-tracker botsort
-python main.py --video-path videos/demo.mp4 --template-path templates/demo.png --person-tracker bytetrack
+uv run main.py --video-path videos/demo.mp4 --template-path templates/demo.png --person-tracker botsort
+uv run main.py --video-path videos/demo.mp4 --template-path templates/demo.png --person-tracker bytetrack
 ```
 
 跟踪器输出的 `track_id` 只作为球员框连续性的弱信号；球员身份仍以 `upper/lower` 半场和球场坐标连续性为准。
@@ -187,13 +163,13 @@ python main.py --video-path videos/demo.mp4 --template-path templates/demo.png -
 切换到姿态估计：
 
 ```bash
-python main.py --video-path videos/demo.mp4 --template-path templates/demo.png --player-detector pose --pose-family rtmpose
+uv run main.py --video-path videos/demo.mp4 --template-path templates/demo.png --player-detector pose --pose-family rtmpose
 ```
 
 使用 Ultralytics YOLO Pose：
 
 ```bash
-python main.py --video-path videos/demo.mp4 --template-path templates/demo.png --player-detector pose --pose-family yolo-pose --yolo-pose-model weights/yolo11s-pose.pt
+uv run main.py --video-path videos/demo.mp4 --template-path templates/demo.png --player-detector pose --pose-family yolo-pose --yolo-pose-model weights/yolo11s-pose.pt
 ```
 
 ### 回合检测说明
@@ -255,7 +231,7 @@ python main.py --video-path videos/demo.mp4 --template-path templates/demo.png -
 
 ```text
 main.py                    # 命令行入口和参数解析
-requirements.txt           # 唯一依赖安装入口
+pyproject.toml             # 项目元数据与依赖（uv 管理）
 tennis_analysis/
 ├── system.py              # 视频分析主流程 TennisAnalysisSystem
 ├── court/                 # 球场标注与坐标映射
@@ -268,12 +244,13 @@ tennis_analysis/
 
 ## 🙏 致谢
 
+本项目基于 [yo-WASSUP/Good-Tennis](https://github.com/yo-WASSUP/Good-Tennis)（Apache 2.0）发展而来，感谢原作者的开源工作。
+
 感谢 RTMPose、RTMO 和 OpenMMLab 生态提供的姿态估计算法基础，以及 [Tau-J/rtmlib](https://github.com/Tau-J/rtmlib) 提供的轻量姿态估计运行库。
 
 感谢 [Ultralytics](https://github.com/ultralytics/ultralytics) 提供的 YOLO 目标检测算法与工具链。
 
 感谢 [yastrebksv/TrackNet](https://github.com/yastrebksv/TrackNet) 项目整理并公开网球数据集，为本项目的网球检测与轨迹分析提供了重要参考。
-
 
 ## 许可证
 

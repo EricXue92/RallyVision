@@ -1,20 +1,12 @@
-# Good-Tennis: AI Tennis Match Analysis Assistant 🎾
-
-## Related Projects
-
-Good-Tennis, Good-Badminton, and Good-Pickleball are part of the same family of computer-vision sports video analysis projects. They share the same core ideas: player detection, ball trajectory tracking, court coordinate mapping, movement statistics, and visualized outputs. Each project adapts the court model, ball target, and sport-specific rules to a different sport.
-
-| Project | Sport | Stars |
-| --- | --- | --- |
-| [Good-Tennis](https://github.com/yo-WASSUP/Good-Tennis) | Tennis video analysis | [![Good-Tennis stars](https://img.shields.io/github/stars/yo-WASSUP/Good-Tennis?style=social)](https://github.com/yo-WASSUP/Good-Tennis/stargazers) |
-| [Good-Badminton](https://github.com/yo-WASSUP/Good-Badminton) | Badminton video analysis | [![Good-Badminton stars](https://img.shields.io/github/stars/yo-WASSUP/Good-Badminton?style=social)](https://github.com/yo-WASSUP/Good-Badminton/stargazers) |
-| [Good-Pickleball](https://github.com/yo-WASSUP/Good-Pickleball) | Pickleball video analysis | [![Good-Pickleball stars](https://img.shields.io/github/stars/yo-WASSUP/Good-Pickleball?style=social)](https://github.com/yo-WASSUP/Good-Pickleball/stargazers) |
+# RallyVision: AI Tennis Match Analysis Assistant 🎾
 
 <div align="center">
 
-[![GitHub license](https://img.shields.io/github/license/yo-WASSUP/Good-Tennis)](https://github.com/yo-WASSUP/Good-Tennis/blob/main/LICENSE)
+[![GitHub license](https://img.shields.io/github/license/EricXue92/RallyVision)](https://github.com/EricXue92/RallyVision/blob/main/LICENSE)
 
 **A computer-vision-based tennis match video analysis tool**
+
+Built upon [Good-Tennis](https://github.com/yo-WASSUP/Good-Tennis) (Apache 2.0)
 
 [Chinese](README.md) | [English](README_en.md)
 
@@ -22,8 +14,8 @@ Good-Tennis, Good-Badminton, and Good-Pickleball are part of the same family of 
 
 ### 🎬 Video Analysis Results
 
-| RTMPose Pose Detection | YOLO26s Person Detection |
-| --- | --- |
+| RTMPose Pose Detection                                            | YOLO26s Person Detection                                            |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------- |
 | ![RTMPose pose detection demo](assets/en_rtmpose_detect_demo.gif) | ![YOLO26s person detection demo](assets/en_yolo26s_detect_demo.gif) |
 
 ## 📝 Changelog
@@ -66,36 +58,26 @@ Good-Tennis, Good-Badminton, and Good-Pickleball are part of the same family of 
 
 ### 📊 Court and Position Visualizations
 
-| Automatic Court Detection | Player Position Heatmap | Player Position Scatter Plot |
-| --- | --- | --- |
+| Automatic Court Detection                     | Player Position Heatmap                                | Player Position Scatter Plot                                |
+| --------------------------------------------- | ------------------------------------------------------ | ----------------------------------------------------------- |
 | ![Automatic court detection](assets/auto.png) | ![Player position heatmap](assets/en_demo_heatmap.png) | ![Player position scatter plot](assets/en_demo_scatter.png) |
 
 ## 🧩 Requirements
 
-- Python 3.8+
+- [uv](https://docs.astral.sh/uv/) (manages the Python version and dependencies automatically)
 - FFmpeg added to the system `PATH`
 - OpenCV / PyTorch / Ultralytics / RTMLib / ONNX Runtime
 - NVIDIA GPU recommended; CPU execution works, but video analysis will be significantly slower
 
 ## ⚙️ Installation
 
-### Windows
+This project uses [uv](https://docs.astral.sh/uv/getting-started/installation/) for dependency management. After installing uv, run in the project root:
 
 ```bash
-python -m venv .venv
-.\.venv\Scripts\activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+uv sync
 ```
 
-### Linux / macOS
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-```
+uv automatically downloads a suitable Python version, creates `.venv`, and installs all dependencies (works on Windows / Linux / macOS).
 
 ### GPU Acceleration (Windows / NVIDIA)
 
@@ -108,11 +90,9 @@ The default dependencies use CPU builds of PyTorch and ONNX Runtime. For GPU acc
 PowerShell:
 
 ```bash
-.\.venv\Scripts\activate
-
-pip uninstall -y torch torchvision onnxruntime
-pip install torch==2.5.1+cu121 torchvision==0.20.1+cu121 --index-url https://download.pytorch.org/whl/cu121
-pip install onnxruntime-gpu==1.20.1
+uv pip uninstall torch torchvision onnxruntime
+uv pip install torch==2.5.1+cu121 torchvision==0.20.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+uv pip install onnxruntime-gpu==1.20.1
 ```
 
 Verify GPU availability:
@@ -132,7 +112,7 @@ CUDAExecutionProvider
 Switch back to CPU builds:
 
 ```bash
-pip install --force-reinstall -r requirements.txt
+uv sync --reinstall
 ```
 
 ## 🧠 Model Weights
@@ -183,7 +163,7 @@ If local RTMPose / RTMO files are missing, `rtmlib` may try to download them int
 2. Run the basic command:
 
 ```bash
-python main.py --video-path videos/demo.mp4 --template-path templates/demo.png
+uv run main.py --video-path videos/demo.mp4 --template-path templates/demo.png
 ```
 
 3. The program will first try to automatically detect the four outer corners of the doubles tennis court.
@@ -200,14 +180,14 @@ If the video camera angle, crop, or template image changes, delete `court_annota
 Use YOLO person detection by default:
 
 ```bash
-python main.py --video-path videos/demo.mp4 --template-path templates/demo.png --person-model weights/yolo26s.pt
+uv run main.py --video-path videos/demo.mp4 --template-path templates/demo.png --person-model weights/yolo26s.pt
 ```
 
 Enable Ultralytics built-in multi-object tracking to reduce cross-frame player box jumps:
 
 ```bash
-python main.py --video-path videos/demo.mp4 --template-path templates/demo.png --person-tracker botsort
-python main.py --video-path videos/demo.mp4 --template-path templates/demo.png --person-tracker bytetrack
+uv run main.py --video-path videos/demo.mp4 --template-path templates/demo.png --person-tracker botsort
+uv run main.py --video-path videos/demo.mp4 --template-path templates/demo.png --person-tracker bytetrack
 ```
 
 The tracker `track_id` is only a weak continuity signal for player boxes; player identity is still maintained by `upper/lower` court region and court-coordinate continuity.
@@ -215,13 +195,13 @@ The tracker `track_id` is only a weak continuity signal for player boxes; player
 Switch to pose estimation:
 
 ```bash
-python main.py --video-path videos/demo.mp4 --template-path templates/demo.png --player-detector pose --pose-family rtmpose
+uv run main.py --video-path videos/demo.mp4 --template-path templates/demo.png --player-detector pose --pose-family rtmpose
 ```
 
 Use Ultralytics YOLO Pose:
 
 ```bash
-python main.py --video-path videos/demo.mp4 --template-path templates/demo.png --player-detector pose --pose-family yolo-pose --yolo-pose-model weights/yolo11s-pose.pt
+uv run main.py --video-path videos/demo.mp4 --template-path templates/demo.png --player-detector pose --pose-family yolo-pose --yolo-pose-model weights/yolo11s-pose.pt
 ```
 
 ### Rally Detection
@@ -283,7 +263,7 @@ Default output directory: `outputs/<video_name>/`
 
 ```text
 main.py                    # CLI entry and argument parsing
-requirements.txt           # Single dependency installation entry
+pyproject.toml             # Project metadata and dependencies (managed by uv)
 tennis_analysis/
 ├── system.py              # Main video analysis workflow: TennisAnalysisSystem
 ├── court/                 # Court annotation and coordinate mapping
@@ -295,6 +275,8 @@ tennis_analysis/
 ```
 
 ## 🙏 Acknowledgements
+
+This project is built upon [yo-WASSUP/Good-Tennis](https://github.com/yo-WASSUP/Good-Tennis) (Apache 2.0). Thanks to the original author for the open-source foundation.
 
 Thanks to RTMPose, RTMO, and the OpenMMLab ecosystem for the pose estimation algorithm foundation, and to [Tau-J/rtmlib](https://github.com/Tau-J/rtmlib) for the lightweight pose estimation runtime.
 Thanks to [Ultralytics](https://github.com/ultralytics/ultralytics) for the YOLO object detection algorithm and toolchain.
