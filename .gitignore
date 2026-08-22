@@ -12,7 +12,8 @@ env/
 
 # Local inputs and generated outputs
 datasets/
-tools/
+tools/*
+!tools/kp_smoke.py
 outputs/
 datasets/
 *.log

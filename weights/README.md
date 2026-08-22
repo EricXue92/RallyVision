@@ -45,3 +45,17 @@ gdown.download(id='1f-Co64ehgq4uddcQm1aFBDtbnyZhQvgG', output='weights/court_key
 
 Or manually download the file from the URL above via a browser and place it at
 `weights/court_keypoints.pt`.
+
+### Smoke test
+
+Once the weights are in place, verify the detector end-to-end with
+`tools/kp_smoke.py`: it runs `CourtKeypointDetector.detect` on the first frame
+of `videos/demo.mp4` (override with `--video-path`), prints the valid point
+count and a `CameraModel.calibrate` reprojection error, and saves a
+numbered-points visualization to `outputs/kp_smoke.png`. If the weights file
+is missing it prints a bilingual "缺权重 / weights missing" message and exits
+0 instead of failing.
+
+```bash
+uv run python tools/kp_smoke.py
+```
