@@ -29,3 +29,8 @@ dependencies = [
 [tool.uv]
 # 本项目是 CLI 应用而非可安装的包，uv 只负责管理依赖环境
 package = false
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+]
