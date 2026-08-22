@@ -105,8 +105,8 @@ def classify_spin(spin_coeff, pre_bounce_vy, post_bounce_vy, wrist_dy=None):
         label = "flat"
 
     agreement = _signal_agreement([value for value, _ in available])
+    # abs(weighted_sum) 与 agreement 均 >= 0，_clip 在此只做上界保护，
+    # confidence 恒落在 [0, 1]
     confidence = _clip(abs(weighted_sum) * agreement)
-    # abs(weighted_sum) 已 >=0，clip 只做上界保护，故 confidence 落在 [0, 1]
-    confidence = max(0.0, confidence)
 
     return label, confidence
