@@ -27,3 +27,40 @@ def test_extracts_two_complete_segments():
 def test_segment_too_short_dropped():
     segs = extract_segments(_mk_points()[:20], [], PLAYERS, fps=60.0)
     assert segs == []                  # 无弹跳事件配对的段丢弃
+
+
+def test_hitter_survives_missing_court_at_reversal_frame():
+    # Finding 1 回归：翻转帧（frame 40）原始 court 缺测，不能让 NaN 比较静默判成
+    # "lower"——该帧真实半场是 upper（y≈4 < 11.885），须靠滑动平均降级判定。
+    pts = _mk_points()
+    pts[40]["court"] = None
+    segs = extract_segments(pts, BOUNCES, PLAYERS, fps=60.0)
+    assert len(segs) == 2
+    assert segs[1].hitter == "upper"
+
+
+def test_transient_glitch_does_not_corrupt_segment():
+    # Finding 2 回归（controller ruling R9）：飞行中段 2-3 帧的尖锐抖动（frame 15-17）
+    # 会在无滞回时造出 [0, 12, 14, 40, 80] 候选击球帧，导致第一段的 hit_frame 被
+    # 抢帧为 14（应为 ~0），静默腐蚀真实分段。加了 MIN_REVERSAL_PERSIST_FRAMES=3
+    # 滞回后，抖动应被过滤，两段的 hit_frame/bounce_frame/hitter 都应与干净轨迹一致。
+    pts = _mk_points()
+    for frame, glitch_dy in [(15, 3.0), (16, 4.0), (17, 1.0)]:
+        x, y = pts[frame]["court"]
+        pts[frame]["court"] = [x, y + glitch_dy]
+
+    segs = extract_segments(pts, BOUNCES, PLAYERS, fps=60.0)
+    assert len(segs) == 2
+    assert segs[0].hit_frame <= 5 and segs[0].bounce_frame == 40 and segs[0].hitter == "lower"
+    assert segs[1].hit_frame == 40 and segs[1].bounce_frame == 80 and segs[1].hitter == "upper"
+
+
+def test_short_segment_with_bounce_dropped():
+    # 可选覆盖：命中「找到弹跳但段长 < 8 帧」分支（与「无弹跳」分支路径不同）。
+    pts = [
+        {"frame": f, "time_sec": f / 60.0, "image": [640, 360], "court": [5.5, 21.0 - 2.0 * f]}
+        for f in range(10)
+    ]
+    bounce = [{"frame": 5, "court": [5.5, 21.0 - 2.0 * 5]}]
+    segs = extract_segments(pts, bounce, PLAYERS, fps=60.0)
+    assert segs == []                  # 弹跳配对成功但段长 5 < MIN_SEGMENT_FRAMES(8)，仍丢弃
