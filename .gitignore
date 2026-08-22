@@ -14,6 +14,8 @@ env/
 datasets/
 tools/*
 !tools/kp_smoke.py
+!tools/validate_speed.py
+!tools/demo_manifest.json
 outputs/
 datasets/
 *.log

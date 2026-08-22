@@ -1,0 +1,8 @@
+[
+  {
+    "video": "videos/demo.mp4",
+    "hit_frame_approx": 25,
+    "caption_kmh": 160,
+    "label": "demo.mp4 tool-path verification only (NOT an accuracy claim; caption_kmh is invented)"
+  }
+]
