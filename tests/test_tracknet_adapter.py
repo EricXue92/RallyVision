@@ -63,6 +63,12 @@ def test_requires_model_or_model_path():
 
 
 def test_roi_rejects_point_outside_expanded_box():
+    """回归测试（controller finding 1b）：ROI 拒绝的检测必须与 visible=False
+    一起把 confidence/candidate_count 也清零，不能留下 confidence=0.9、
+    candidate_count=1 这种「不可见但仍标着高置信度候选」的不一致状态——
+    对齐 TennisBallTracker（tennis_ball.py:70-77）的口径：它的 ROI 过滤在
+    `_extract_candidates` 阶段就做了，`candidate_count = len(candidates)`
+    天然已经是过 ROI 之后的计数，selected 为 None 时 confidence 恒 None。"""
     detector = TrackNetBallDetector(
         model=_fixed_heatmap_model(peak=(1, 1), value=0.9), input_width=W, input_height=H
     )
@@ -73,6 +79,26 @@ def test_roi_rejects_point_outside_expanded_box():
 
     assert point == [0, 0]
     assert detector.last_detection["visible"] is False
+    assert detector.last_detection["image"] is None
+    assert detector.last_detection["confidence"] is None
+    assert detector.last_detection["candidate_count"] == 0
+
+
+def test_sub_threshold_heatmap_confidence_is_none():
+    """回归测试（controller finding 1a）：热图峰值存在但低于阈值时，
+    confidence 必须是 None（不能泄漏原始浮点值），与 TennisBallTracker
+    「selected is None ⇒ confidence is None」的口径一致。"""
+    detector = TrackNetBallDetector(
+        model=_fixed_heatmap_model(peak=(5, 3), value=0.2), input_width=W, input_height=H
+    )
+
+    point = detector.detect_ball(_blank_frame(), conf=0.5)
+
+    assert point == [0, 0]
+    assert detector.last_detection["visible"] is False
+    assert detector.last_detection["image"] is None
+    assert detector.last_detection["confidence"] is None
+    assert detector.last_detection["candidate_count"] == 0
 
 
 def test_third_frame_uses_real_sliding_window_without_error():
@@ -82,3 +108,36 @@ def test_third_frame_uses_real_sliding_window_without_error():
     for _ in range(3):
         point = detector.detect_ball(frame, conf=0.5)
     assert point != [0, 0]
+
+
+def test_stacked_model_input_shape_dtype_and_channel_order():
+    """回归测试（controller finding 2）：验证喂给模型的堆叠输入张量形状/
+    dtype/通道堆叠顺序符合 _build_model_input 的实现约定——3 帧沿 channel
+    维堆叠成 [9,H,W]、float 类型、newest-first（channel 0-2 是最新帧，
+    3-5 中间帧，6-8 最早帧；见该方法内的注释：对齐上游 infer_on_video.py
+    的 `concatenate((img, img_prev, img_preprev))` 顺序）。"""
+    captured = {}
+
+    def capturing_model(stacked_input):
+        captured["stacked_input"] = stacked_input
+        return np.zeros((H, W), dtype=np.float32)
+
+    detector = TrackNetBallDetector(model=capturing_model, input_width=W, input_height=H)
+
+    # 3 帧视觉上可分辨的常量值帧（已经是 input_width x input_height，
+    # cv2.resize 是恒等变换，避免插值噪声干扰通道值断言）
+    oldest = np.full((H, W, 3), int(0.1 * 255), dtype=np.uint8)
+    middle = np.full((H, W, 3), int(0.5 * 255), dtype=np.uint8)
+    newest = np.full((H, W, 3), int(0.9 * 255), dtype=np.uint8)
+
+    detector.detect_ball(oldest, conf=0.5)
+    detector.detect_ball(middle, conf=0.5)
+    detector.detect_ball(newest, conf=0.5)  # 此时窗口已满且全是真实帧，无复制填充
+
+    stacked = captured["stacked_input"]
+    assert stacked.shape == (9, H, W)
+    assert np.issubdtype(stacked.dtype, np.floating)
+
+    assert stacked[0:3].mean() == pytest.approx(0.9, abs=0.01)  # newest
+    assert stacked[3:6].mean() == pytest.approx(0.5, abs=0.01)  # middle
+    assert stacked[6:9].mean() == pytest.approx(0.1, abs=0.01)  # oldest

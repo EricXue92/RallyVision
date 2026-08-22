@@ -1,9 +1,14 @@
 """球场 14 关键点检测封装。
 
-模型：yastrebksv/TennisCourtDetector（Apache-2.0）
-https://github.com/yastrebksv/TennisCourtDetector
-权重下载见 weights/README.md；网络结构 (BallTrackerNet) 直接抄自该仓库
-的 tracknet.py（Apache-2.0，见下方类注释）。
+模型架构依据 TrackNet 论文（Huang et al. 2019, arXiv:1907.03698）；参考实现：
+https://github.com/yastrebksv/TennisCourtDetector（该仓库未声明许可证——
+GitHub API `license` 字段为 None，仓库根目录也没有 LICENSE 文件，使用/
+再分发权利未经核实，不要当作 Apache-2.0 或其他任何已知许可证对待）。
+Architecture per the TrackNet paper (Huang et al. 2019); reference
+implementation: github.com/yastrebksv/TennisCourtDetector (no license
+declared upstream — usage/redistribution status unverified).
+权重下载见 weights/README.md；网络结构 (BallTrackerNet) 直接抄自该参考
+实现的 tracknet.py，见下方类注释。
 
 点序映射（上游模型输出通道 -> 本项目 COURT_KEYPOINTS_M 索引）
 ================================================================
@@ -71,9 +76,10 @@ _MIN_VALID_POINTS = 6
 class CourtKeypointDetector:
     """封装 yastrebksv/TennisCourtDetector 的 14 点热图网络。
 
-    ``BallTrackerNet`` 网络结构逐字复制自上游仓库 tracknet.py
+    ``BallTrackerNet`` 网络结构逐字复制自参考实现 tracknet.py
     （https://github.com/yastrebksv/TennisCourtDetector/blob/main/tracknet.py，
-    Apache-2.0 许可），仅保留结构定义，不含其训练代码。
+    该仓库未声明许可证，见文件头模块 docstring），仅保留结构定义，不含其
+    训练代码。
     """
 
     def __init__(self, model_path, device=None):
@@ -141,8 +147,9 @@ class CourtKeypointDetector:
 def _build_ball_tracker_net_class():
     """延迟构建网络结构类（内部 import torch，保证顶层模块不强依赖 torch）。
 
-    结构逐字对应上游仓库 tracknet.py 的 ConvBlock / BallTrackerNet
-    （Apache-2.0，来源见文件头注释），未做任何改动。
+    结构逐字对应参考实现 tracknet.py 的 ConvBlock / BallTrackerNet（来源 +
+    许可证状态见文件头模块 docstring——上游未声明许可证，不是 Apache-2.0），
+    未做任何改动。
     """
     import torch.nn as nn
 

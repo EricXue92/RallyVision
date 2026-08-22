@@ -1,9 +1,14 @@
 """TrackNet 网球检测封装（--ball-detector tracknet 后端）。
 
-模型：yastrebksv/TrackNet（Apache-2.0）
-https://github.com/yastrebksv/TrackNet
-权重下载见 weights/README.md；网络结构 (BallTrackerNet) 抄自该仓库的
-model.py（Apache-2.0，仅保留结构定义，不含训练代码）。
+模型架构依据 TrackNet 论文（Huang et al. 2019, arXiv:1907.03698）；参考实现：
+https://github.com/yastrebksv/TrackNet（该仓库未声明许可证——GitHub API
+`license` 字段为 None，仓库根目录也没有 LICENSE 文件，使用/再分发权利未经
+核实，不要当作 Apache-2.0 或其他任何已知许可证对待）。
+Architecture per the TrackNet paper (Huang et al. 2019); reference
+implementation: github.com/yastrebksv/TrackNet (no license declared
+upstream — usage/redistribution status unverified).
+权重下载见 weights/README.md；网络结构 (BallTrackerNet) 抄自该参考实现的
+model.py，仅保留结构定义，不含训练代码。
 
 与球场关键点检测器共享同名结构（court/keypoint_detector.py 的
 BallTrackerNet），但两者是不同上游仓库的不同网络实例，**不能直接复用**
@@ -94,7 +99,7 @@ class TrackNetBallDetector:
         if self.show_performance_stats:
             print(f"TrackNet ball inference took {time.time() - t0:.2f} sec")
 
-        peak_point, confidence = self._peak_from_heatmap(heatmap, conf)
+        peak_point, raw_confidence = self._peak_from_heatmap(heatmap, conf)
 
         final_point = None
         if peak_point is not None:
@@ -104,12 +109,24 @@ class TrackNetBallDetector:
             if self._point_in_roi(scaled, roi_corners):
                 final_point = scaled
 
+        # 与 TennisBallTracker 对齐（tennis_ball.py:70-77）：它的 `candidates`
+        # 由 `_extract_candidates` 产出，ROI 过滤在候选提取阶段就做了
+        # （`_point_in_roi` 调用见其 _extract_candidates 内部），所以
+        # `candidate_count = len(candidates)` 天然已经是「过 ROI 之后」的计数，
+        # `confidence`/`image` 只在 selected 非空（=candidates 非空）时才非
+        # None——即 visible / confidence 非 None / candidate_count>0 三者恒
+        # 同步，没有「ROI 拒绝但 candidate_count 仍 >0」这种状态。本检测器
+        # 只有一个全局热图峰值候选，按同一口径:峰值过阈值但被 ROI 拒绝时，
+        # 视为该候选未通过候选提取阶段，一并清零 confidence/candidate_count。
+        confidence = raw_confidence if final_point is not None else None
+        candidate_count = 1 if final_point is not None else 0
+
         self.last_detection = {
             "visible": final_point is not None,
             "accepted": False,
             "image": list(final_point) if final_point is not None else None,
             "confidence": confidence,
-            "candidate_count": 1 if peak_point is not None else 0,
+            "candidate_count": candidate_count,
         }
         return list(final_point) if final_point is not None else [0, 0]
 
@@ -203,10 +220,11 @@ class _TorchBallTrackerNetAdapter:
 def _build_ball_tracker_net_class():
     """延迟构建网络结构类（内部 import torch，保证顶层模块不强依赖 torch）。
 
-    结构逐字对应上游仓库 model.py 的 ConvBlock / BallTrackerNet
-    （Apache-2.0，来源见文件头注释），仅将末尾 `.reshape(batch,
-    out_channels, -1)` + 条件 softmax 省略（无参数的纯后处理变换，见模块
-    docstring），其余卷积/池化/上采样层与权重形状逐一对应。
+    结构逐字对应参考实现 model.py 的 ConvBlock / BallTrackerNet（来源 +
+    许可证状态见文件头模块 docstring——上游未声明许可证，不是 Apache-2.0），
+    仅将末尾 `.reshape(batch, out_channels, -1)` + 条件 softmax 省略（无参数
+    的纯后处理变换，见模块 docstring），其余卷积/池化/上采样层与权重形状
+    逐一对应。
     """
     import torch.nn as nn
 

@@ -22,9 +22,12 @@ weights/rtmo-s_8xb32-600e_body7-640x640-dac2bf74_20231211.onnx
 ## Court keypoint detector (`weights/court_keypoints.pt`)
 
 Used by `tennis_analysis/court/keypoint_detector.py::CourtKeypointDetector` (14-point
-court keypoint heatmap network from
-[yastrebksv/TennisCourtDetector](https://github.com/yastrebksv/TennisCourtDetector),
-Apache-2.0).
+court keypoint heatmap network, architecture per the TrackNet paper (Huang et al.
+2019); reference implementation:
+[yastrebksv/TennisCourtDetector](https://github.com/yastrebksv/TennisCourtDetector).
+That repo declares no license (GitHub API `license` field is `None`, no LICENSE
+file in the repo root) — usage/redistribution status is unverified; do not treat
+it as Apache-2.0 or any other known license.
 
 The pretrained weights are hosted on Google Drive (linked from that repo's README,
 "Pretrained model" section):
@@ -63,8 +66,12 @@ uv run python tools/kp_smoke.py
 ## TrackNet ball detector (`weights/tracknet_ball.pt`)
 
 Used by `tennis_analysis/detection/tracknet_ball.py::TrackNetBallDetector`
-(9-channel 3-frame-stack ball heatmap network from
-[yastrebksv/TrackNet](https://github.com/yastrebksv/TrackNet), Apache-2.0).
+(9-channel 3-frame-stack ball heatmap network, architecture per the TrackNet
+paper (Huang et al. 2019); reference implementation:
+[yastrebksv/TrackNet](https://github.com/yastrebksv/TrackNet)). That repo
+declares no license (GitHub API `license` field is `None`, no LICENSE file in
+the repo root) — usage/redistribution status is unverified; do not treat it
+as Apache-2.0 or any other known license.
 This is the `--ball-detector tracknet` backend (default remains `yolo`; see
 `main.py --ball-detector`). It is a separate upstream repo/checkpoint from
 the court keypoint detector above — same overall `BallTrackerNet` skeleton
