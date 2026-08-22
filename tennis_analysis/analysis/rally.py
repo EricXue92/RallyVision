@@ -86,13 +86,6 @@ def extract_rallies(shots, bounces, visible, fps) -> list:
                 if state["current"] is not None:
                     close_rally(invisible_run_start, "ball_lost")
 
-        if (
-            state["current"] is not None
-            and state["pending_out_frame"] is not None
-            and frame - state["pending_out_frame"] >= out_no_reply_frames
-        ):
-            close_rally(state["pending_out_frame"], "out_no_reply")
-
         for bounce in bounces_by_frame.get(frame, []):
             if state["current"] is None:
                 continue
@@ -123,6 +116,15 @@ def extract_rallies(shots, bounces, visible, fps) -> list:
             long_invisible_seen = False
             state["pending_out_frame"] = None
             state["pending_bounce_side"] = None
+
+        # 超时判定放在同帧的 bounce/shot 处理之后：若本帧恰好有回击拍（重置了
+        # pending_out_frame),不应误判为超时无回击而收尾（曾在此漏掉同帧回击拍）。
+        if (
+            state["current"] is not None
+            and state["pending_out_frame"] is not None
+            and frame - state["pending_out_frame"] >= out_no_reply_frames
+        ):
+            close_rally(state["pending_out_frame"], "out_no_reply")
 
     if state["current"] is not None:
         close_rally(total_frames - 1, "video_end")

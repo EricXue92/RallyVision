@@ -94,3 +94,25 @@ def test_ball_lost_ends_rally():
     assert rally.end_reason == "ball_lost"
     assert rally.end_frame == 100
     assert len(rally.shots) == 2
+
+
+def test_reply_shot_exactly_at_timeout_boundary_is_not_dropped():
+    # 回归测试：out 弹跳后恰好第 OUT_NO_REPLY_FRAMES 帧有回击拍，
+    # 该拍必须被收进回合、回合不应被判定为 out_no_reply 提前收尾。
+    # （曾因超时判定先于同帧的击球处理执行，导致这拍被静默丢弃。）
+    shots = [
+        {"hit_frame": 10, "shot_type": "serve", "hitter": "lower"},
+        {"hit_frame": 50 + 30, "shot_type": "forehand", "hitter": "upper"},
+    ]
+    bounces = [
+        {"frame": 50, "court": [5.5, 4.0], "line_call": "out", "side": "upper"},
+    ]
+    visible = [True] * 150
+
+    rallies = extract_rallies(shots, bounces, visible, fps=60)
+
+    assert len(rallies) == 1
+    rally = rallies[0]
+    assert rally.end_reason == "video_end"
+    assert len(rally.shots) == 2
+    assert any(shot["hit_frame"] == 80 for shot in rally.shots)
