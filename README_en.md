@@ -284,7 +284,7 @@ Default output directory: `outputs/<video_name>/`
 ### Accuracy statement
 
 - **Synthetic data (physics-simulated trajectories)**: against a real camera model plus a noisy physics-simulated trajectory, speed error is < 5% on 60fps footage and < 8% on 30fps footage (see the parametrized case `tests/test_trajectory3d.py::test_recovers_speed_within_tolerance_by_fps`, which quantifies how frame rate affects fit accuracy). Both synthetic spin-direction cases (topspin/slice) recover the correct sign (`test_recovers_topspin_sign`/`test_recovers_slice_sign`).
-- **Real broadcast data**: acceptance criteria require a median error < 10%, but that requires ≥10 real broadcast serve clips with official speed captions (copyrighted/licensed material not included in this repo — the owner must supply it). **Running the real-data validation batch is currently an owner TODO.** The manifest format and command are documented below under "Validation tool".
+- **Real broadcast data**: acceptance criteria require a median error < 10%, but that requires ≥10 real broadcast serve clips with official speed captions (copyrighted/licensed material not included in this repo — the owner must supply it). **Running the real-data validation batch is currently an owner TODO.** The manifest format and command are documented below under "Validation tool". While running that real-clip batch, it's worth also doing a manual spot-check of the line-call (IN/OUT) output in the same session — eyeball roughly 20 bounce points against `line_call`, allowing a "close" call within ±15cm of the line.
 
 ### Known accuracy status
 

@@ -12,7 +12,6 @@ from tennis_analysis.court.mapper import (
 )
 
 _SINGLES_MARGIN = (TENNIS_DOUBLES_WIDTH - TENNIS_SINGLES_WIDTH) / 2
-BALL_DIAMETER = BALL_RADIUS * 2
 
 
 def call_bounce(court_xy, mode="doubles", close_margin_m=0.15):
@@ -43,7 +42,10 @@ def call_bounce(court_xy, mode="doubles", close_margin_m=0.15):
 
     if distance_to_line_m < close_margin_m:
         verdict = "close"
-    elif signed_distance > BALL_DIAMETER:
+    elif signed_distance > BALL_RADIUS:
+        # 整球出界规则：球只要有任何部分触线即算压线（界内友好判罚）。
+        # 球心到线距离 < 半径 → 球体与线仍有接触 → 界内；> 半径才是整球出界。
+        # （此前误用直径，R16 判罚裁定为半径口径）
         verdict = "out"
     else:
         verdict = "in"
