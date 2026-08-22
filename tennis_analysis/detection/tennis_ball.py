@@ -49,14 +49,13 @@ class TennisBallTracker:
             self.ultra_device = 0
         else:
             self.ultra_device = "cpu"
-        self.ultra_half = self.ultra_device != "cpu"
         self._fuse_model()
         self._warmup_model()
 
     def detect_ball(self, frame, conf=0.18, roi_corners=None):
         t0 = time.time()
         try:
-            ball_results = self.yolo_ball_model(frame, conf=conf, device=self.ultra_device, half=self.ultra_half, verbose=False)[0]
+            ball_results = self.yolo_ball_model(frame, conf=conf, device=self.ultra_device, verbose=False)[0]
         except TypeError:
             ball_results = self.yolo_ball_model(frame, conf=conf, verbose=False)[0]
 
@@ -269,7 +268,7 @@ class TennisBallTracker:
             dummy = np.zeros((640, 640, 3), dtype=np.uint8)
             try:
                 with open(os.devnull, "w") as devnull, redirect_stdout(devnull), redirect_stderr(devnull):
-                    self.yolo_ball_model(dummy, conf=0.18, device=self.ultra_device, half=self.ultra_half, verbose=False)
+                    self.yolo_ball_model(dummy, conf=0.18, device=self.ultra_device, verbose=False)
             finally:
                 LOGGER.setLevel(previous_level)
         except Exception:

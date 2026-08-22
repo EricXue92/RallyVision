@@ -3,6 +3,7 @@ import os
 import pickle
 import warnings
 from dataclasses import dataclass
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -41,8 +42,8 @@ class LegacyColumnConcatenator(BaseEstimator, TransformerMixin):
 class TrajectoryPoint:
     frame: int
     time_sec: float
-    image: list | None
-    court: list | None
+    image: Optional[list]
+    court: Optional[list]
     interpolated: bool = False
 
 

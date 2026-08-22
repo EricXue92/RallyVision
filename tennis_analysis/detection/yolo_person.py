@@ -28,7 +28,6 @@ class YOLOPersonDetector:
             self.device = selected
         else:
             self.device = device
-        self.half = self.device != "cpu"
 
         tracker_label = self.tracker_config if self.tracker != "none" else "none"
         print(f"Initializing YOLO person model (model: {self.model_path}, device: {self.device}, tracker: {tracker_label})")
@@ -56,7 +55,7 @@ class YOLOPersonDetector:
 
     def _run_inference(self, frame):
         if self.tracker == "none":
-            return self.model(frame, conf=self.conf, device=self.device, classes=[0], half=self.half, verbose=False)[0]
+            return self.model(frame, conf=self.conf, device=self.device, classes=[0], verbose=False)[0]
 
         try:
             return self.model.track(
@@ -64,7 +63,6 @@ class YOLOPersonDetector:
                 conf=self.conf,
                 device=self.device,
                 classes=[0],
-                half=self.half,
                 verbose=False,
                 persist=True,
                 tracker=self.tracker_config,
@@ -122,7 +120,7 @@ class YOLOPersonDetector:
             dummy = np.zeros((640, 640, 3), dtype=np.uint8)
             try:
                 with open(os.devnull, "w") as devnull, redirect_stdout(devnull), redirect_stderr(devnull):
-                    self.model(dummy, conf=self.conf, device=self.device, classes=[0], half=self.half, verbose=False)
+                    self.model(dummy, conf=self.conf, device=self.device, classes=[0], verbose=False)
             finally:
                 LOGGER.setLevel(previous_level)
         except Exception:
