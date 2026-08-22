@@ -43,6 +43,70 @@ _MODEL_INPUT_HEIGHT = 360
 _WINDOW_SIZE = 3
 _DEFAULT_CONF_THRESHOLD = 0.5
 
+# Task 9b Step 1: 球员框 gating 常数（TrackNet / WASB 两后端共用）。
+# 阈值以 1280x720 为基准分辨率标定，按实际帧分辨率等比缩放（见 _gating_scale）。
+_GATING_REFERENCE_WIDTH = 1280
+_GATING_REFERENCE_HEIGHT = 720
+_GATING_JUMP_THRESHOLD_PX = 150  # 候选点距上一帧接受点超过此距离才算「跳变」
+_GATING_PLAYER_PROXIMITY_THRESHOLD_PX = 300  # 跳变点距最近球员中心在此距离内视为合法击球
+
+
+def _gating_resolution_scale(frame_width, frame_height):
+    """按帧分辨率相对 1280x720 基准的等比缩放系数（宽高各自比例取平均，
+    兼容非 16:9 输入）。frame_width/frame_height 缺失或为 0 时返回 1.0
+    （等同不缩放，只在真拿不到分辨率时退化，正常调用路径恒有值）。"""
+    if not frame_width or not frame_height:
+        return 1.0
+    return ((frame_width / _GATING_REFERENCE_WIDTH) + (frame_height / _GATING_REFERENCE_HEIGHT)) / 2.0
+
+
+def _euclidean_distance(point_a, point_b):
+    return float(np.hypot(point_a[0] - point_b[0], point_a[1] - point_b[1]))
+
+
+def is_implausible_ball_jump(
+    candidate_point,
+    last_accepted_point,
+    player_centers,
+    frame_width=_GATING_REFERENCE_WIDTH,
+    frame_height=_GATING_REFERENCE_HEIGHT,
+):
+    """球员框 gating 纯函数（Task 9b Step 1，TrackNet / WASB 两后端共用，
+    供两边 detect_ball 内部 import 调用，也单独可测）。
+
+    球的合法位置突变只发生在球员击球处：候选球点若同时满足「距上一帧接受点
+    > 150px」且「距 player_centers 中每一个球员中心都 > 300px」，判定为误检，
+    返回 True（应丢弃该候选，detect_ball 视为本帧不可见）。否则返回 False
+    （放行）。两个阈值都按 frame_width/frame_height 相对 1280x720 基准等比
+    缩放（见 _gating_resolution_scale）。
+
+    - last_accepted_point 为 None（无上一帧参照，如回合刚开始/首次检测）→
+      不构成「跳变」判定的基础，直接放行（False）。
+    - player_centers 为 None 或空 → 拿不到球员数据时 gating 直接放行
+      （False），不允许因缺球员检测数据而误丢球（Task 9b brief 明确要求）。
+    - player_centers 中的 None 元素（该侧球员本帧未检出）会被跳过，不参与
+      距离比较。
+    """
+    if last_accepted_point is None:
+        return False
+    if not player_centers:
+        return False
+
+    scale = _gating_resolution_scale(frame_width, frame_height)
+    jump_threshold = _GATING_JUMP_THRESHOLD_PX * scale
+    proximity_threshold = _GATING_PLAYER_PROXIMITY_THRESHOLD_PX * scale
+
+    if _euclidean_distance(candidate_point, last_accepted_point) <= jump_threshold:
+        return False  # 不算跳变，正常连续轨迹，放行
+
+    for center in player_centers:
+        if center is None:
+            continue
+        if _euclidean_distance(candidate_point, center) <= proximity_threshold:
+            return False  # 跳变但靠近球员（合法击球点），放行
+
+    return True  # 跳变且远离所有球员，判误检丢弃
+
 
 class TrackNetBallDetector:
     """TrackNet 球检测封装，接口对齐 detection/tennis_ball.py::TennisBallTracker。
@@ -82,13 +146,14 @@ class TrackNetBallDetector:
 
         self._frame_window = deque(maxlen=_WINDOW_SIZE)
         self.last_detection = self._empty_detection_state()
+        self._last_accepted_point = None  # Task 9b gating：上一帧被接受的球点（跨帧持久）
 
         if model is not None:
             self._model_fn = model
         else:
             self._model_fn = _TorchBallTrackerNetAdapter(model_path, device=device)
 
-    def detect_ball(self, frame, conf=_DEFAULT_CONF_THRESHOLD, roi_corners=None):
+    def detect_ball(self, frame, conf=_DEFAULT_CONF_THRESHOLD, roi_corners=None, player_centers=None):
         t0 = time.time()
         orig_h, orig_w = frame.shape[:2]
 
@@ -109,6 +174,16 @@ class TrackNetBallDetector:
             if self._point_in_roi(scaled, roi_corners):
                 final_point = scaled
 
+        # Task 9b Step 1：球员框 gating——ROI 通过之后再过一道「跳变且远离
+        # 所有球员」的误检过滤（is_implausible_ball_jump 是纯函数，player_centers
+        # 拿不到时直接放行，不因缺球员数据丢球）。gating 拒绝与 ROI 拒绝走同一套
+        # 「视为该候选未通过候选提取阶段」口径，下面 confidence/candidate_count
+        # 清零逻辑统一处理，不需要在这里分别处理。
+        if final_point is not None and is_implausible_ball_jump(
+            final_point, self._last_accepted_point, player_centers, orig_w, orig_h
+        ):
+            final_point = None
+
         # 与 TennisBallTracker 对齐（tennis_ball.py:70-77）：它的 `candidates`
         # 由 `_extract_candidates` 产出，ROI 过滤在候选提取阶段就做了
         # （`_point_in_roi` 调用见其 _extract_candidates 内部），所以
@@ -128,12 +203,15 @@ class TrackNetBallDetector:
             "confidence": confidence,
             "candidate_count": candidate_count,
         }
+        if final_point is not None:
+            self._last_accepted_point = tuple(final_point)
         return list(final_point) if final_point is not None else [0, 0]
 
     def get_last_detection(self):
         return dict(self.last_detection)
 
     def clear(self):
+        self._last_accepted_point = None
         self._frame_window.clear()
         self.last_detection = self._empty_detection_state()
 
@@ -198,8 +276,8 @@ class TrackNetBallTrackerAdapter:
         self.tennis_ball_trajectory = deque(maxlen=trajectory_length)
         self.last_valid_position = None
 
-    def detect_ball(self, frame, roi_corners=None):
-        return self._detector.detect_ball(frame, roi_corners=roi_corners)
+    def detect_ball(self, frame, roi_corners=None, player_centers=None):
+        return self._detector.detect_ball(frame, roi_corners=roi_corners, player_centers=player_centers)
 
     def update_trajectory(self, ball_position, roi_corners=None):
         if ball_position is None or list(ball_position) == [0, 0]:

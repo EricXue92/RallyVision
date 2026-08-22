@@ -23,8 +23,9 @@ def main():
     parser.add_argument('--template-path', default='templates/demo.png', type=str, help='球场模板图像路径；不提供时会弹出文件选择框')
     parser.add_argument('--output-dir', default=None, type=str, help='输出目录，默认 outputs/<视频文件名>')
     parser.add_argument('--ball-model', default='weights/tennis-ball.pt', type=str, help='YOLO 网球检测模型路径')
-    parser.add_argument('--ball-detector', default='yolo', choices=['yolo', 'tracknet'], type=str, help='球检测后端：yolo 或 tracknet')
+    parser.add_argument('--ball-detector', default='yolo', choices=['yolo', 'tracknet', 'wasb'], type=str, help='球检测后端：yolo、tracknet 或 wasb')
     parser.add_argument('--tracknet-model', default='weights/tracknet_ball.pt', type=str, help='TrackNet 网球检测模型路径（--ball-detector tracknet 时使用）')
+    parser.add_argument('--wasb-model', default='weights/wasb_tennis.pth', type=str, help='WASB-SBDT 网球检测模型路径（--ball-detector wasb 时使用）')
     parser.add_argument('--player-detector', default='yolo-person', choices=['pose', 'yolo-person'], help='球员检测方式：pose 使用姿态关键点，yolo-person 使用 YOLO 人框底部中点')
     parser.add_argument('--person-model', default='weights/yolo26s.pt', type=str, help='YOLO 人体目标检测模型路径或模型名，默认 weights/yolo26s.pt')
     parser.add_argument('--person-tracker', default='botsort', choices=['none', 'botsort', 'bytetrack'], help='YOLO 人体框多目标跟踪器：none、botsort 或 bytetrack，默认 botsort')
@@ -90,6 +91,7 @@ def main():
         show_mini_map=args.mini_map == 'true',
         ball_detector=args.ball_detector,
         tracknet_model_path=args.tracknet_model,
+        wasb_model_path=args.wasb_model,
         court_calibration=args.court_calibration,
         keypoint_model_path=args.keypoint_model,
         shot_metrics=args.shot_metrics == 'true',

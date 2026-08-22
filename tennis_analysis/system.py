@@ -18,6 +18,7 @@ def load_runtime_dependencies():
     global median_keypoints_over_frames, keypoints_drifted
     global compute_shot_metrics_entries, write_shot_metrics, call_bounce
     global TrackNetBallDetector, TrackNetBallTrackerAdapter
+    global WASBBallDetector, WASBBallTrackerAdapter
 
     yolo_config_dir = os.path.join(tempfile.gettempdir(), "good-tennis-ultralytics")
     os.makedirs(yolo_config_dir, exist_ok=True)
@@ -54,6 +55,8 @@ def load_runtime_dependencies():
         from .analysis.line_call import call_bounce as _call_bounce
         from .detection.tracknet_ball import TrackNetBallDetector as _TrackNetBallDetector
         from .detection.tracknet_ball import TrackNetBallTrackerAdapter as _TrackNetBallTrackerAdapter
+        from .detection.wasb_ball import WASBBallDetector as _WASBBallDetector
+        from .detection.wasb_ball import WASBBallTrackerAdapter as _WASBBallTrackerAdapter
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             f"Missing Python dependency: {exc.name}. "
@@ -99,6 +102,8 @@ def load_runtime_dependencies():
     call_bounce = _call_bounce
     TrackNetBallDetector = _TrackNetBallDetector
     TrackNetBallTrackerAdapter = _TrackNetBallTrackerAdapter
+    WASBBallDetector = _WASBBallDetector
+    WASBBallTrackerAdapter = _WASBBallTrackerAdapter
 
 class TennisAnalysisSystem:
     def __init__(self, video_path, show_display=True, 
@@ -116,6 +121,7 @@ class TennisAnalysisSystem:
                  bounce_classifier_path='', show_mini_map=True,
                  court_match_width=320,
                  ball_detector='yolo', tracknet_model_path='weights/tracknet_ball.pt',
+                 wasb_model_path='weights/wasb_tennis.pth',
                  court_calibration='keypoints', keypoint_model_path='weights/court_keypoints.pt',
                  shot_metrics=True, line_call='doubles'):
         self.video_path = video_path
@@ -136,8 +142,9 @@ class TennisAnalysisSystem:
         self.court_match_width = court_match_width
 
         # Task 10: shot metrics / spin / line calling 主流程接线
-        self.ball_detector = ball_detector  # 'yolo' | 'tracknet'
+        self.ball_detector = ball_detector  # 'yolo' | 'tracknet' | 'wasb'
         self.tracknet_model_path = tracknet_model_path
+        self.wasb_model_path = wasb_model_path
         self.court_calibration = court_calibration  # 'keypoints' | 'homography'（强制降级）
         self.keypoint_model_path = keypoint_model_path
         self.enable_shot_metrics = bool(shot_metrics)
@@ -160,6 +167,18 @@ class TennisAnalysisSystem:
                 f"Input video not found: {self.video_path}\n"
                 "Pass a valid video file with --video-path."
             )
+        if self.ball_detector == 'wasb' and not os.path.exists(self.wasb_model_path):
+            # WASB 是可选备用后端（Task 9b delta）：缺权重时不整体中断运行，
+            # 打印清晰双语提示后降级回默认的 yolo 后端（与下面 yolo 分支的
+            # 权重存在性检查共用同一套校验，降级后走同一条路径）。
+            print(
+                f"[WASBBallDetector] 缺权重，降级为 yolo 球检测后端 / "
+                f"weights missing, falling back to the yolo ball-detection backend: "
+                f"{self.wasb_model_path}\n"
+                "下载方式见 weights/README.md「WASB ball detector」章节 / "
+                "See weights/README.md, the \"WASB ball detector\" section, for the download steps."
+            )
+            self.ball_detector = 'yolo'
         if self.ball_detector == 'yolo' and not os.path.exists(self.ball_model_path):
             raise FileNotFoundError(
                 f"Ball detection model not found: {self.ball_model_path}\n"
@@ -185,7 +204,7 @@ class TennisAnalysisSystem:
         else:
             self.rtmpose_processor = RTMPoseProcessor(mode=self.pose_mode, pose_family=self.pose_family)
 
-        if self.ball_detector == 'tracknet':
+        if self.ball_detector in ('tracknet', 'wasb'):
             self.yolo_ball_model = None
         else:
             self.yolo_ball_model = YOLO(self.ball_model_path)
@@ -221,6 +240,9 @@ class TennisAnalysisSystem:
         if self.ball_detector == 'tracknet':
             tracknet_detector = TrackNetBallDetector(model_path=self.tracknet_model_path)
             self.tennis_ball_tracker = TrackNetBallTrackerAdapter(tracknet_detector, trajectory_length=30)
+        elif self.ball_detector == 'wasb':
+            wasb_detector = WASBBallDetector(model_path=self.wasb_model_path)
+            self.tennis_ball_tracker = WASBBallTrackerAdapter(wasb_detector, trajectory_length=30)
         else:
             self.tennis_ball_tracker = TennisBallTracker(
                 yolo_ball_model=self.yolo_ball_model,
@@ -329,6 +351,14 @@ class TennisAnalysisSystem:
         
         self._cleanup(cap)
 
+    def _active_ball_model_path(self):
+        """当前生效的球检测模型路径（三选一，供 metadata 记录）。"""
+        if self.ball_detector == 'tracknet':
+            return self.tracknet_model_path
+        if self.ball_detector == 'wasb':
+            return self.wasb_model_path
+        return self.ball_model_path
+
     def _write_metadata(self, fps, total_frames, video_duration, template_path, corners, roi_corners, mid_height):
         metadata = {
             "schema_version": SCHEMA_VERSION,
@@ -342,7 +372,7 @@ class TennisAnalysisSystem:
                 "height": int(self.frame_height),
             },
             "models": {
-                "tennis_ball": self.tracknet_model_path if self.ball_detector == 'tracknet' else self.ball_model_path,
+                "tennis_ball": self._active_ball_model_path(),
                 "ball_detector": self.ball_detector,
                 "player_detector": self.player_detector,
                 "person": self.person_model if self.player_detector == 'yolo-person' else None,
@@ -433,7 +463,15 @@ class TennisAnalysisSystem:
 
         centroids, point_left_hands, point_right_hands = self._detect_players(roi, x1, y1, detect_frame_count)
 
-        detected_ball_position = self.tennis_ball_tracker.detect_ball(frame, roi_corners=roi_corners)
+        if self.ball_detector in ('tracknet', 'wasb'):
+            # Task 9b Step 1：球员框 gating 只接入 TrackNet/WASB 两个热图后端
+            # （brief 明确范围），YOLO 后端沿用旧调用不传 player_centers。
+            player_centers = self._player_centers_for_gating(centroids)
+            detected_ball_position = self.tennis_ball_tracker.detect_ball(
+                frame, roi_corners=roi_corners, player_centers=player_centers
+            )
+        else:
+            detected_ball_position = self.tennis_ball_tracker.detect_ball(frame, roi_corners=roi_corners)
         ball_position = self.tennis_ball_tracker.update_trajectory(detected_ball_position, roi_corners)
         ball_court_position = self.court_mapper.image_to_court(ball_position) if ball_position != [0, 0] else None
         bounce_event = None
@@ -502,6 +540,23 @@ class TennisAnalysisSystem:
         if self._should_run_detection(detect_frame_count, self.player_detect_interval) or self.cached_player_detection is None:
             self.cached_player_detection = self.player_pose_visualizer.detect_players(roi, x1, y1)
         return self.cached_player_detection
+
+    @staticmethod
+    def _player_centers_for_gating(centroids):
+        """把 `_detect_players` 返回的 centroids 统一抽取成 (x,y) 点列表，供
+        Task 9b 球员框 gating（`tracknet_ball.is_implausible_ball_jump`）使用。
+
+        centroids 元素格式因 `player_detector` 模式而异（见
+        visualization/player_pose.py）：'yolo-person' 模式下是
+        `{'point': (x,y), 'track_id': ...}` dict，'pose' 模式下是裸 (x,y)
+        tuple。这里统一成点列表，坐标已是全帧空间（ROI 偏移在
+        detect_players 内部加过），与球检测坐标系一致。"""
+        points = []
+        for centroid in centroids:
+            point = centroid.get("point") if isinstance(centroid, dict) else centroid
+            if point is not None:
+                points.append(point)
+        return points
 
     def _get_template_path(self):
         """Get the court template image path."""
