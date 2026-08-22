@@ -18,3 +18,30 @@ weights/yolox_nano_8xb8-300e_humanart-40f6f0d0.onnx
 weights/rtmpose-s_simcc-body7_pt-body7_420e-256x192-acd4a1ef_20230504.onnx
 weights/rtmo-s_8xb32-600e_body7-640x640-dac2bf74_20231211.onnx
 ```
+
+## Court keypoint detector (`weights/court_keypoints.pt`)
+
+Used by `tennis_analysis/court/keypoint_detector.py::CourtKeypointDetector` (14-point
+court keypoint heatmap network from
+[yastrebksv/TennisCourtDetector](https://github.com/yastrebksv/TennisCourtDetector),
+Apache-2.0).
+
+The pretrained weights are hosted on Google Drive (linked from that repo's README,
+"Pretrained model" section):
+
+```text
+https://drive.google.com/file/d/1f-Co64ehgq4uddcQm1aFBDtbnyZhQvgG/view?usp=drive_link
+```
+
+Download with `gdown` (no interactive auth needed, it's a public "anyone with the
+link" file) and save it as `weights/court_keypoints.pt`:
+
+```bash
+uv run --with gdown python -c "
+import gdown
+gdown.download(id='1f-Co64ehgq4uddcQm1aFBDtbnyZhQvgG', output='weights/court_keypoints.pt', quiet=False)
+"
+```
+
+Or manually download the file from the URL above via a browser and place it at
+`weights/court_keypoints.pt`.

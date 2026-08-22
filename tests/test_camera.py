@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 from tennis_analysis.court.camera import CameraModel
+from tennis_analysis.court.keypoint_detector import COURT_KEYPOINTS_M
 
 W, H = 1280, 720
 
@@ -17,12 +18,9 @@ def _lookat_extrinsics(cam_pos, target):
     return rvec, tvec
 
 
-COURT_POINTS = np.array([  # 标准场 14 点 (x,y)，与 Task 4 的 COURT_KEYPOINTS_M 一致
-    [0, 0], [10.97, 0], [0, 23.77], [10.97, 23.77],
-    [1.37, 0], [9.60, 0], [1.37, 23.77], [9.60, 23.77],
-    [1.37, 5.485], [9.60, 5.485], [1.37, 18.285], [9.60, 18.285],
-    [5.485, 5.485], [5.485, 18.285],
-], dtype=float)
+# 标准场 14 点 (x,y)，米。规范定义在 tennis_analysis/court/keypoint_detector.py
+# 的 COURT_KEYPOINTS_M，这里直接复用同一份数据，避免重复字面量（Task 4）。
+COURT_POINTS = COURT_KEYPOINTS_M
 
 
 def test_calibrate_recovers_projection():
