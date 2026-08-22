@@ -47,6 +47,13 @@ def main():
     parser.add_argument('--keypoint-model', default='weights/court_keypoints.pt', type=str, help='球场关键点检测模型路径')
     parser.add_argument('--shot-metrics', choices=['true', 'false'], default='true', help='是否计算击球速度/旋转（segments/shot_metrics/spin），默认 true')
     parser.add_argument('--line-call', default='doubles', choices=['singles', 'doubles', 'off'], help='弹跳落点判罚：singles/doubles 场地模式，off 关闭，默认 doubles')
+    parser.add_argument('--match-scoring', choices=['true', 'false'], default='false', help='是否跑比赛层分析（击球类型/回合/每分判定/计分/统计），默认 false')
+    parser.add_argument('--first-server', default='lower', choices=['upper', 'lower'], help='首局发球方：upper 或 lower，默认 lower')
+    parser.add_argument('--upper-hand', default='right', choices=['right', 'left'], help='upper 方持拍手：right 或 left，默认 right')
+    parser.add_argument('--lower-hand', default='right', choices=['right', 'left'], help='lower 方持拍手：right 或 left，默认 right')
+    parser.add_argument('--best-of', default='3', choices=['3', '5'], help='几盘制：3 或 5，默认 3')
+    parser.add_argument('--no-ad', choices=['true', 'false'], default='false', help='是否用 no-ad 平分即金球计分，默认 false')
+    parser.add_argument('--highlights', choices=['true', 'false'], default='false', help='是否导出集锦视频（需 --match-scoring true），默认 false')
     parser.add_argument('--player-stats', choices=['true', 'false'], default='true', help='是否显示球员统计信息，默认 true')
     parser.add_argument('--save-images', action='store_true', default=False, help='保存处理后的图像')
     parser.add_argument('--performance-stats', action='store_true', default=False, help='显示性能统计信息')
@@ -96,6 +103,13 @@ def main():
         keypoint_model_path=args.keypoint_model,
         shot_metrics=args.shot_metrics == 'true',
         line_call=args.line_call,
+        match_scoring=args.match_scoring == 'true',
+        first_server=args.first_server,
+        upper_hand=args.upper_hand,
+        lower_hand=args.lower_hand,
+        best_of=int(args.best_of),
+        no_ad=args.no_ad == 'true',
+        highlights=args.highlights == 'true',
     )
 
     system.keep_audio = args.audio == 'true'
