@@ -58,6 +58,27 @@ def _escape_concat_path(path) -> str:
     return str(path).replace("'", "'\\''")
 
 
+def _drawtext_available(ffmpeg_bin) -> bool:
+    """探测这份 ffmpeg 是否编译了 drawtext（需要 libfreetype/fontconfig）。
+
+    Probe whether this ffmpeg build has the drawtext filter compiled in
+    (requires libfreetype/fontconfig). Some distro/Homebrew bottles ship
+    without it, in which case `ffmpeg -h filter=drawtext` prints
+    "Unknown filter 'drawtext'." instead of the filter's help text.
+    探测失败（ffmpeg 本身跑不起来等）一律当作不可用，不让探测本身抛异常。
+    Any failure while probing is treated as "unavailable" — never raises.
+    """
+    try:
+        result = subprocess.run(
+            [ffmpeg_bin, "-hide_banner", "-h", "filter=drawtext"],
+            capture_output=True, text=True,
+        )
+    except OSError:
+        return False
+    combined = (result.stdout or "") + (result.stderr or "")
+    return "Unknown filter" not in combined
+
+
 def export_highlights(video_path, rallies, score_lines, out_path, fps) -> bool:
     """把已挑选好的回合逐段切出（叠加比分板）并拼接为一条集锦视频。
 
@@ -92,6 +113,18 @@ def export_highlights(video_path, rallies, score_lines, out_path, fps) -> bool:
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
+    drawtext_available = _drawtext_available(ffmpeg_bin)
+    if not drawtext_available:
+        print(
+            "[集锦导出] 当前 ffmpeg 未编译 drawtext 滤镜，记分板叠加已跳过，"
+            "仍会导出无叠加的集锦（如需记分板叠加，可 `brew reinstall ffmpeg` "
+            "换一份带 drawtext 的完整版）/ "
+            "[highlights] This ffmpeg build has no drawtext filter compiled "
+            "in — scoreboard overlay skipped, exporting highlights without "
+            "overlay (a full ffmpeg build, e.g. via `brew reinstall ffmpeg`, "
+            "restores it)."
+        )
+
     with tempfile.TemporaryDirectory(prefix="rallyvision_highlights_") as tmp_dir:
         segment_paths = []
         for index, rally in enumerate(rallies):
@@ -100,19 +133,20 @@ def export_highlights(video_path, rallies, score_lines, out_path, fps) -> bool:
             end_sec = rally.end_frame / float(fps)
             segment_path = os.path.join(tmp_dir, f"seg_{index:04d}.mp4")
 
-            drawtext_filter = (
-                "drawtext=text='{text}':x=24:y=24:fontsize=36:"
-                "fontcolor=white:box=1:boxcolor=black@0.5"
-            ).format(text=_escape_drawtext(score_text))
-
             cmd = [
                 ffmpeg_bin, "-y",
                 "-ss", f"{start_sec:.3f}",
                 "-to", f"{end_sec:.3f}",
                 "-i", str(video_path),
-                "-vf", drawtext_filter,
-                segment_path,
             ]
+            if drawtext_available:
+                drawtext_filter = (
+                    "drawtext=text='{text}':x=24:y=24:fontsize=36:"
+                    "fontcolor=white:box=1:boxcolor=black@0.5"
+                ).format(text=_escape_drawtext(score_text))
+                cmd += ["-vf", drawtext_filter]
+            cmd.append(segment_path)
+
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode != 0:
                 print(
