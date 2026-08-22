@@ -325,11 +325,19 @@ class BounceDetector:
 
     def _load_records(self, path):
         records = []
-        with open(path, "r", encoding="utf-8") as file:
-            for line in file:
-                line = line.strip()
-                if line:
+        skipped = 0
+        with open(path, "r", encoding="utf-8", errors="replace") as file:
+            for line_number, line in enumerate(file, 1):
+                line = line.replace("\x00", "").strip()
+                if not line:
+                    continue
+                try:
                     records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    skipped += 1
+                    print(f"警告: 跳过 {path} 第 {line_number} 行损坏数据 / Warning: skipping corrupt line {line_number} in {path}")
+        if skipped:
+            print(f"警告: 共跳过 {skipped} 行损坏数据，弹跳分析基于剩余 {len(records)} 条记录 / Warning: skipped {skipped} corrupt lines; bounce analysis uses the remaining {len(records)} records")
         return records
 
     def _records_to_points(self, records):
