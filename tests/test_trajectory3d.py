@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pytest
 from tennis_analysis.analysis.physics import simulate_trajectory, sample_at
@@ -64,3 +66,30 @@ def test_recovers_speed_within_tolerance_by_fps(fps, max_err):
     assert fit.ok
     truth = np.linalg.norm(v0) * 3.6
     assert abs(fit.speed_kmh - truth) / truth < max_err
+
+
+def test_empty_frame_times_fails_gracefully():
+    """空段（0 帧）不得崩溃，应直接返回 ok=False。"""
+    cam = _make_camera()
+    fit = fit_segment(cam, np.array([]), np.zeros((0, 2)), bounce_court_xy=[5.0, 10.0],
+                      hit_hint_xyz=[5.0, 2.5, 1.1])
+    assert fit.ok is False
+
+
+def test_single_frame_segment_fails_gracefully():
+    """单帧段初值猜测（(bounce-hint)/t）会发散到边界外，须提前判失败而非扔 ValueError。"""
+    cam = _make_camera()
+    fit = fit_segment(cam, np.array([0.0]), np.array([[640.0, 360.0]]),
+                      bounce_court_xy=[5.0, 10.0], hit_hint_xyz=[5.0, 2.5, 1.1])
+    assert fit.ok is False
+
+
+def test_all_nan_observations_fails_without_warnings():
+    """全 NaN 观测应判失败，且不能产生 numpy RuntimeWarning（如 rms 用空数组求 mean）。"""
+    cam, ft, px, bxy, p0 = _synthesize(np.array([0.5, 28.0, 1.5]), spin=0.0)
+    px[:] = np.nan
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        fit = fit_segment(cam, ft, px, bxy, hit_hint_xyz=[5.0, 2.5, 1.1])
+    assert fit.ok is False
+    assert fit.rms_px == float("inf")
