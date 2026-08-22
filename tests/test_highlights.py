@@ -152,3 +152,101 @@ def test_export_highlights_degrades_when_drawtext_unavailable(monkeypatch, capsy
     for cmd in segment_cmds:
         assert "-vf" not in cmd
         assert not any("drawtext" in str(arg) for arg in cmd)
+
+
+def test_export_highlights_uses_drawtext_filter_when_available(monkeypatch, tmp_path):
+    # ffmpeg 存在,且探测到 drawtext 可用 → 切片命令应带 -vf drawtext=...
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(highlights, "_drawtext_available", lambda ffmpeg_bin: True)
+
+    recorded_cmds = []
+
+    def fake_run(cmd, capture_output=True, text=True):
+        recorded_cmds.append(cmd)
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(highlights.subprocess, "run", fake_run)
+
+    rally = _rally(0, 100, n_shots=9)
+    score_text = "O'Brien 6-4"  # 含单引号,验证真的走了转义,不是巧合过关
+    out_path = tmp_path / "highlight.mp4"
+    ok = export_highlights(
+        video_path="videos/demo.mp4",
+        rallies=[rally],
+        score_lines=[score_text],
+        out_path=str(out_path),
+        fps=25.0,
+    )
+
+    assert ok is True
+
+    segment_cmds = [cmd for cmd in recorded_cmds if "-f" not in cmd]
+    assert segment_cmds, "expected at least one segment-cut command to be recorded"
+    cmd = segment_cmds[0]
+    assert "-vf" in cmd
+
+    vf_value = cmd[cmd.index("-vf") + 1]
+    expected_escaped = highlights._escape_drawtext(score_text)
+    expected_filter = (
+        f"drawtext=text='{expected_escaped}':x=24:y=24:fontsize=36:"
+        "fontcolor=white:box=1:boxcolor=black@0.5"
+    )
+    assert vf_value == expected_filter
+    # 断言真的转义过(单引号真被换成了收尾/转义/重开的写法),不是原样漏转义
+    assert "'\\''" in vf_value
+    assert "O'Brien" not in vf_value
+
+
+def test_escape_drawtext_escapes_single_quote_with_breakout_idiom():
+    # 单引号需要「收尾引号 + 转义插入字面引号 + 重开引号」的 '\'' 写法
+    assert highlights._escape_drawtext("O'Brien") == "O'\\''Brien"
+
+
+def test_escape_drawtext_leaves_colon_and_backslash_literal():
+    # 一旦被外层单引号包住,ffmpeg 自己的 filtergraph 解析器逐字复制引号内内容,
+    # 冒号、反斜杠都不再有特殊含义,不应被转义
+    assert highlights._escape_drawtext("6:4 3\\2") == "6:4 3\\2"
+
+
+def test_escape_drawtext_treats_none_as_empty_string():
+    assert highlights._escape_drawtext(None) == ""
+
+
+def test_escape_concat_path_escapes_single_quote():
+    assert (
+        highlights._escape_concat_path("/tmp/seg's/seg_0.mp4")
+        == "/tmp/seg'\\''s/seg_0.mp4"
+    )
+
+
+def test_drawtext_available_false_when_subprocess_raises_oserror(monkeypatch):
+    def raising_run(cmd, capture_output=True, text=True):
+        raise OSError("no such file or directory")
+
+    monkeypatch.setattr(highlights.subprocess, "run", raising_run)
+
+    assert highlights._drawtext_available("/usr/bin/ffmpeg") is False
+
+
+def test_drawtext_available_false_when_unknown_filter_reported(monkeypatch):
+    def fake_run(cmd, capture_output=True, text=True):
+        return subprocess.CompletedProcess(
+            cmd, returncode=1, stdout="", stderr="Unknown filter 'drawtext'.\n"
+        )
+
+    monkeypatch.setattr(highlights.subprocess, "run", fake_run)
+
+    assert highlights._drawtext_available("/usr/bin/ffmpeg") is False
+
+
+def test_drawtext_available_true_when_filter_help_printed(monkeypatch):
+    def fake_run(cmd, capture_output=True, text=True):
+        return subprocess.CompletedProcess(
+            cmd, returncode=0,
+            stdout="Filter drawtext\n  Draw text on top of video frames...\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(highlights.subprocess, "run", fake_run)
+
+    assert highlights._drawtext_available("/usr/bin/ffmpeg") is True
