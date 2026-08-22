@@ -13,6 +13,7 @@ from tools.validate_speed import (
     build_pipeline_args,
     compute_relative_error,
     load_manifest,
+    main,
     median_relative_error,
     output_dir_for,
     rms_px_distribution,
@@ -49,6 +50,23 @@ def test_load_manifest_parses_valid_entries(tmp_path):
 
 def test_load_manifest_rejects_non_list(tmp_path):
     path = _write(tmp_path, "m.json", {"video": "x"})
+    with pytest.raises(ManifestError):
+        load_manifest(path)
+
+
+def test_load_manifest_missing_file_raises_manifest_error_not_raw_traceback(tmp_path):
+    # review fix: 之前 open() 的 FileNotFoundError 会原样冒出去，不是工具自己的双语
+    # ManifestError——manifest 路径打错是最常见的用户错误，必须走友好路径。
+    missing_path = os.path.join(str(tmp_path), "does_not_exist.json")
+    with pytest.raises(ManifestError):
+        load_manifest(missing_path)
+
+
+def test_load_manifest_malformed_json_raises_manifest_error(tmp_path):
+    # review fix：json.JSONDecodeError 同样要归一到 ManifestError，不能裸传出去。
+    path = os.path.join(str(tmp_path), "bad.json")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("{not valid json,,,")
     with pytest.raises(ManifestError):
         load_manifest(path)
 
@@ -247,3 +265,25 @@ def test_rms_px_distribution_handles_none_values():
     assert stats["count"] == 0
     assert stats["min"] is None
     assert stats["fit_fail_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# main() 顶层错误处理（review fix：missing/malformed manifest 不能裸 traceback）
+# ---------------------------------------------------------------------------
+
+def test_main_missing_manifest_file_returns_error_code_not_traceback(tmp_path, capsys):
+    missing_path = os.path.join(str(tmp_path), "does_not_exist.json")
+    rc = main(["--manifest", missing_path])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "manifest" in out.lower()
+
+
+def test_main_malformed_manifest_returns_error_code_not_traceback(tmp_path, capsys):
+    path = os.path.join(str(tmp_path), "bad.json")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("{not valid json,,,")
+    rc = main(["--manifest", path])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "manifest" in out.lower()

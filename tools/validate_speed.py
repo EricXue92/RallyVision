@@ -84,10 +84,28 @@ class ManifestError(ValueError):
 def load_manifest(path):
     """读取并校验 manifest JSON，返回标准化条目列表。
 
+    文件不存在/无法读取/JSON 格式错误都归一到 ManifestError（双语消息），不让原始
+    FileNotFoundError / json.JSONDecodeError 的裸 traceback 冒出去。
+
     Read and validate the manifest JSON, returning a list of normalized entries.
+    Missing file / unreadable file / malformed JSON are all normalized into
+    ManifestError (bilingual message) instead of letting a raw
+    FileNotFoundError / json.JSONDecodeError traceback escape.
     """
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw_text = f.read()
+    except OSError as e:
+        raise ManifestError(
+            f"manifest 文件不存在或无法读取 / manifest file not found or unreadable: {path} ({e})"
+        )
+
+    try:
+        data = json.loads(raw_text)
+    except json.JSONDecodeError as e:
+        raise ManifestError(
+            f"manifest 不是合法 JSON / manifest is not valid JSON: {path} ({e})"
+        )
 
     if not isinstance(data, list) or not data:
         raise ManifestError(
@@ -188,8 +206,11 @@ def output_dir_for(video_path, root=None):
     """按视频文件名 stem 分配输出目录（不带序号）——同一支视频的重复验证跑复用同一目录，
 
     从而复用已缓存的 `court_annotations.txt`，避免每次都触发 main.py 的交互式球场确认
-    （见模块docstring「注意」）。root 默认落在 `outputs/validate_speed/`；显式传 `root=None`
-    以外的值时，多个 manifest 条目引用同一视频会天然去重到同一目录。
+    （见模块docstring「注意」）。root 默认落在 `outputs/`（`DEFAULT_OUTPUT_ROOT`），与
+    `main.py` 单独跑该视频时的默认输出目录完全一致——这是刻意选择，为的是同一支视频不管
+    是手动跑 main.py 预热标定缓存，还是被本工具跑，都落在同一目录，天然复用缓存的
+    `court_annotations.txt`（见模块顶部「注意」段落）。想把验证产物与手动跑的输出隔开时，
+    显式传 `--output-root` 指定别的目录（例如 `outputs/validate_speed/`）。
 
     Output directory keyed by video filename stem (no index) — repeated validation
     runs on the same clip reuse the same directory and its cached
@@ -469,7 +490,10 @@ def main(argv=None):
     parser.add_argument("--line-call", default="doubles", choices=["singles", "doubles", "off"],
                          help="落点判罚场地模式 / line-call court mode")
     parser.add_argument("--output-root", default=None,
-                         help="输出根目录，默认 outputs/validate_speed / output root, default outputs/validate_speed")
+                         help="输出根目录，默认 outputs/（与 main.py 自己的默认输出目录一致，"
+                              "天然复用缓存的 court_annotations.txt）/ "
+                              "output root, default outputs/ (matches main.py's own default "
+                              "output directory, so cached court_annotations.txt is reused)")
     parser.add_argument("--skip-pipeline", action="store_true",
                          help="目标输出目录已有 shot_metrics.json 时复用、不重跑 pipeline / "
                               "reuse existing shot_metrics.json instead of rerunning the pipeline")
@@ -479,12 +503,20 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.triage:
+        if args.manifest:
+            print("同时传了 --triage 和 --manifest，忽略 --manifest，只跑 Step3 诊断 / "
+                  "both --triage and --manifest given; ignoring --manifest, running Step-3 diagnostics only")
         return run_triage(args.triage)
 
     if not args.manifest:
         parser.error("需要 --manifest 或 --triage 之一 / need either --manifest or --triage")
 
-    rows = validate(args.manifest, args.ball_detector, args.line_call, args.output_root, args.skip_pipeline)
+    try:
+        rows = validate(args.manifest, args.ball_detector, args.line_call, args.output_root, args.skip_pipeline)
+    except ManifestError as e:
+        print(f"manifest 错误 / manifest error: {e}")
+        return 1
+
     print_report(rows)
     return 0
 

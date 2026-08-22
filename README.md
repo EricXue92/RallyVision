@@ -228,7 +228,7 @@ uv run main.py --video-path videos/demo.mp4 --template-path templates/demo.png -
 
 ### 精度声明
 
-- **合成数据（物理仿真弹道）**：真实相机模型 + 物理弹道仿真（含噪声）下，60fps 素材球速误差 < 5%，30fps 素材误差 < 8%（见 `tests/test_trajectory3d.py::test_recovers_speed_within_tolerance_by_fps` 的参数化用例，量化了帧率对拟合精度的影响）。旋转方向（上旋/下旋）判定符号在合成数据下始终正确。
+- **合成数据（物理仿真弹道）**：真实相机模型 + 物理弹道仿真（含噪声）下，60fps 素材球速误差 < 5%，30fps 素材误差 < 8%（见 `tests/test_trajectory3d.py::test_recovers_speed_within_tolerance_by_fps` 的参数化用例，量化了帧率对拟合精度的影响）。合成数据两类用例（上旋/切削）方向判定均正确（`test_recovers_topspin_sign`/`test_recovers_slice_sign`）。
 - **真实转播数据**：验收标准要求中位数误差 < 10%，但需要 ≥10 条带官方球速字幕的真实转播发球片段（版权/授权素材，仓库内不提供，需 owner 手工准备）。**真实数据验证跑批目前是 owner 的 TODO**，manifest 格式和执行命令见下方「验证工具」。
 
 ### 已知精度状态
