@@ -1,4 +1,4 @@
-from tennis_analysis.analysis.segments import extract_segments
+from tennis_analysis.analysis.segments import extract_segments, refine_bounce
 
 
 def _mk_points():
@@ -64,3 +64,25 @@ def test_short_segment_with_bounce_dropped():
     bounce = [{"frame": 5, "court": [5.5, 21.0 - 2.0 * 5]}]
     segs = extract_segments(pts, bounce, PLAYERS, fps=60.0)
     assert segs == []                  # 弹跳配对成功但段长 5 < MIN_SEGMENT_FRAMES(8)，仍丢弃
+
+
+def _v_shape_points(vertex=40.3):
+    # image y 先降后升（V 形，谷底在 40.3 帧，亚帧），court y 全程匀速推进
+    pts = []
+    for f in range(25, 56):
+        img_y = 500 + (12 * (vertex - f) if f < vertex else 9 * (f - vertex))
+        pts.append({"frame": f, "time_sec": f / 60.0,
+                    "image": [640.0, img_y], "court": [5.5, 21.0 - 0.42 * (f - 25)]})
+    return pts
+
+
+def test_refine_bounce_subframe_vertex():
+    t_sub, court_xy = refine_bounce(_v_shape_points(), bounce_frame=40)
+    assert abs(t_sub - 40.3) < 0.2
+    assert abs(court_xy[1] - (21.0 - 0.42 * (40.3 - 25))) < 0.1   # court 按亚帧时刻插值
+
+
+def test_refine_bounce_falls_back_when_sparse():
+    pts = _v_shape_points()[13:18]          # 前后凑不齐 3 帧
+    t_sub, court_xy = refine_bounce(pts, bounce_frame=40)
+    assert t_sub == 40.0                     # 原样返回，不抛异常
