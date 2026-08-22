@@ -59,3 +59,34 @@ is missing it prints a bilingual "缺权重 / weights missing" message and exits
 ```bash
 uv run python tools/kp_smoke.py
 ```
+
+## TrackNet ball detector (`weights/tracknet_ball.pt`)
+
+Used by `tennis_analysis/detection/tracknet_ball.py::TrackNetBallDetector`
+(9-channel 3-frame-stack ball heatmap network from
+[yastrebksv/TrackNet](https://github.com/yastrebksv/TrackNet), Apache-2.0).
+This is the `--ball-detector tracknet` backend (default remains `yolo`; see
+`main.py --ball-detector`). It is a separate upstream repo/checkpoint from
+the court keypoint detector above — same overall `BallTrackerNet` skeleton
+but different `in_channels` (9 vs 3) and `out_channels` (256 vs 15), so the
+network class is a separate copy in `tracknet_ball.py`, not a shared import.
+
+The pretrained weights are hosted on Google Drive (linked from that repo's
+README, "Pretrained model" section):
+
+```text
+https://drive.google.com/file/d/1XEYZ4myUN7QT-NeBYJI0xteLsvs-ZAOl/view?usp=sharing
+```
+
+Download with `gdown` (no interactive auth needed, it's a public "anyone with
+the link" file) and save it as `weights/tracknet_ball.pt`:
+
+```bash
+uv run --with gdown python -c "
+import gdown
+gdown.download(id='1XEYZ4myUN7QT-NeBYJI0xteLsvs-ZAOl', output='weights/tracknet_ball.pt', quiet=False)
+"
+```
+
+Or manually download the file from the URL above via a browser and place it
+at `weights/tracknet_ball.pt`.

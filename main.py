@@ -23,6 +23,13 @@ def main():
     parser.add_argument('--template-path', default='templates/demo.png', type=str, help='球场模板图像路径；不提供时会弹出文件选择框')
     parser.add_argument('--output-dir', default=None, type=str, help='输出目录，默认 outputs/<视频文件名>')
     parser.add_argument('--ball-model', default='weights/tennis-ball.pt', type=str, help='YOLO 网球检测模型路径')
+    # TODO(Task 10): 目前只接收+存储该参数，尚未接入 TennisAnalysisSystem——
+    # system.py 构造函数硬编码了 YOLO 模型加载 + TennisBallTracker 装配
+    # （self.ball_model_path 存在性校验、self.yolo_ball_model = YOLO(...)、
+    # self.tennis_ball_tracker = TennisBallTracker(yolo_ball_model=...)），
+    # 真正切换成 TrackNetBallDetector 需要条件分支改造这几处，不是本任务
+    # （Task 9：TrackNet 检测后端本体）的"trivial pass-through"范畴。
+    parser.add_argument('--ball-detector', default='yolo', choices=['yolo', 'tracknet'], type=str, help='球检测后端：yolo 或 tracknet（TrackNet 接线见 Task 10）')
     parser.add_argument('--player-detector', default='yolo-person', choices=['pose', 'yolo-person'], help='球员检测方式：pose 使用姿态关键点，yolo-person 使用 YOLO 人框底部中点')
     parser.add_argument('--person-model', default='weights/yolo26s.pt', type=str, help='YOLO 人体目标检测模型路径或模型名，默认 weights/yolo26s.pt')
     parser.add_argument('--person-tracker', default='botsort', choices=['none', 'botsort', 'bytetrack'], help='YOLO 人体框多目标跟踪器：none、botsort 或 bytetrack，默认 botsort')
