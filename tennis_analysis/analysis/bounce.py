@@ -221,13 +221,21 @@ class BounceDetector:
         trajectory_length=30,
         draw_minimap_bounces=True,
         draw_processed_trajectory=True,
+        bounce_line_calls=None,
+        shot_hits=None,
     ):
+        """Task 10: 追加 bounce_line_calls（frame -> "in"/"out"/"close"）在弹跳标记旁画判罚，
+        shot_hits（hit_frame -> shot_metrics 条目 dict）在击球帧起 1.5s 画 "hitter speed · spin"。
+        两者都是可选的（None/空 dict 时行为与 Task 10 之前完全一致）。
+        """
         if not events and not trajectory_points:
             return False
 
         events = sorted(events, key=lambda event: int(event["frame"]))
         trajectory_points = trajectory_points or self.processed_points
         trajectory_by_frame = self._trajectory_by_frame(trajectory_points)
+        bounce_line_calls = bounce_line_calls or {}
+        shot_hits = shot_hits or {}
         video = cv2.VideoCapture(input_video_path)
         if not video.isOpened():
             raise RuntimeError(f"Unable to open video for bounce annotation: {input_video_path}")
@@ -242,6 +250,7 @@ class BounceDetector:
             video.release()
             raise RuntimeError(f"Unable to create bounce annotation video: {raw_output_video_path}")
         display_frames = max(1, int((fps or self.fps) * float(display_sec)))
+        shot_display_frames = max(1, int((fps or self.fps) * 1.5))
         minimap = MiniMapVisualizer() if draw_minimap_bounces else None
         frame_index = 0
         while True:
@@ -256,7 +265,10 @@ class BounceDetector:
             if draw_processed_trajectory:
                 self.draw_processed_trajectory(frame, frame_index, trajectory_by_frame, trajectory_length=trajectory_length)
             for event in active_events:
-                self.draw_event(frame, event, age_frames=frame_index - int(event["frame"]), display_frames=display_frames)
+                line_call = bounce_line_calls.get(int(event["frame"]))
+                self.draw_event(frame, event, age_frames=frame_index - int(event["frame"]), display_frames=display_frames, line_call=line_call)
+            if shot_hits:
+                self.draw_active_shot_labels(frame, frame_index, shot_hits, shot_display_frames)
             if minimap is not None and active_events:
                 minimap.draw_bounce_events(frame, active_events)
             if minimap is not None and draw_processed_trajectory:
@@ -294,7 +306,10 @@ class BounceDetector:
         x, y = int(latest.image[0]), int(latest.image[1])
         cv2.circle(frame, (x, y), 7, (0, 215, 255), -1, cv2.LINE_AA)
 
-    def draw_event(self, frame, event, age_frames=0, display_frames=1):
+    # verdict -> BGR，out 红 / in 绿 / close 黄（复用弹跳标记本身的琥珀色，保持同一色系）
+    LINE_CALL_COLORS = {"out": (0, 0, 255), "in": (0, 200, 0), "close": (0, 215, 255)}
+
+    def draw_event(self, frame, event, age_frames=0, display_frames=1, line_call=None):
         image = event.get("image")
         if not image:
             return
@@ -315,6 +330,36 @@ class BounceDetector:
             2,
             cv2.LINE_AA,
         )
+        if line_call:
+            verdict_color = self.LINE_CALL_COLORS.get(line_call, (255, 255, 255))
+            cv2.putText(
+                frame,
+                line_call.upper(),
+                (x + 14, max(24, y - 12) + 22),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.62,
+                verdict_color,
+                2,
+                cv2.LINE_AA,
+            )
+
+    def draw_active_shot_labels(self, frame, frame_index, shot_hits, display_frames):
+        """在击球帧起 display_frames 内画 "<hitter> <speed> km/h · <spin_label>"；
+        拟合失败（fit_ok=False，含 homography-only 降级）时速度/旋转显示 "—"。
+        """
+        offset = 0
+        for hit_frame, metric in sorted(shot_hits.items()):
+            age = frame_index - int(hit_frame)
+            if not (0 <= age <= display_frames):
+                continue
+            speed = metric.get("speed_kmh")
+            spin_label = metric.get("spin_label")
+            speed_text = f"{speed:.0f} km/h" if speed is not None else "—"
+            spin_text = spin_label if spin_label else "—"
+            text = f"{metric.get('hitter', '?')} {speed_text} · {spin_text}"
+            y = 40 + offset * 26
+            cv2.putText(frame, text, (24, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+            offset += 1
 
     def get_events(self):
         return list(self.events)

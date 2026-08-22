@@ -180,6 +180,62 @@ class TrackNetBallDetector:
         }
 
 
+class TrackNetBallTrackerAdapter:
+    """把 TrackNetBallDetector 包成与 TennisBallTracker 相同的 detect_ball/update_trajectory/
+    clear_trajectory 三件套接口，供 system.py `--ball-detector tracknet` 时原地替换
+    `self.tennis_ball_tracker`，不改 `_process_frame` 里的调用方式（Task 10 wiring）。
+
+    TrackNetBallDetector.detect_ball 内部已做置信度阈值 + ROI 过滤（检测阶段守卫，见其
+    docstring），语义上已相当于 TennisBallTracker 的 detect_ball+update_trajectory 两步合一
+    ——ROI 拒绝时直接返回 [0,0]。这里的 update_trajectory 因此只做与 TennisBallTracker 语义
+    一致的直通："[0,0]即缺测"，不重复实现 YOLO 多候选框才需要的跳变外点竞争剔除
+    （TrackNet 单峰值热图检测没有多候选框互相打分的场景）。trajectory 缓冲区仅用于保持
+    get_trajectory()/draw_trajectory() 等下游可视化接口不崩，不影响检测正确性。
+    """
+
+    def __init__(self, detector, trajectory_length=30):
+        self._detector = detector
+        self.tennis_ball_trajectory = deque(maxlen=trajectory_length)
+        self.last_valid_position = None
+
+    def detect_ball(self, frame, roi_corners=None):
+        return self._detector.detect_ball(frame, roi_corners=roi_corners)
+
+    def update_trajectory(self, ball_position, roi_corners=None):
+        if ball_position is None or list(ball_position) == [0, 0]:
+            return [0, 0]
+        point = [int(ball_position[0]), int(ball_position[1])]
+        self.tennis_ball_trajectory.append(tuple(point))
+        self.last_valid_position = tuple(point)
+        return point
+
+    def clear_trajectory(self):
+        self.tennis_ball_trajectory.clear()
+        self.last_valid_position = None
+        self._detector.clear()
+
+    def get_last_detection(self):
+        return self._detector.get_last_detection()
+
+    def get_trajectory(self):
+        return list(self.tennis_ball_trajectory)
+
+    def draw_trajectory(self, frame):
+        if not self.tennis_ball_trajectory:
+            return
+        color = (87, 108, 255)
+        points = list(self.tennis_ball_trajectory)
+        for index, point in enumerate(points):
+            radius = int(3 + (index / len(points)) * 4)
+            cv2.circle(frame, point, radius, color, thickness=-1, lineType=cv2.LINE_AA)
+        latest_point = points[-1]
+        cv2.circle(frame, latest_point, 6, (0, 165, 255), thickness=-1, lineType=cv2.LINE_AA)
+
+    def handle_visualization(self, frame):
+        if self.tennis_ball_trajectory:
+            self.draw_trajectory(frame)
+
+
 class _TorchBallTrackerNetAdapter:
     """把 torch nn.Module 包装成 (stacked_input[9,H,W]) -> heatmap[H,W] 的可
     调用对象，与测试注入的 fake model 遵循同一契约，使 TrackNetBallDetector

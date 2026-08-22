@@ -2,7 +2,7 @@
 import os
 
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 
 def _clean_value(value):

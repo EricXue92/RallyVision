@@ -1,4 +1,5 @@
-﻿import os
+﻿import json
+import os
 import tempfile
 from tkinter import filedialog
 import tkinter as tk
@@ -13,6 +14,9 @@ def load_runtime_dependencies():
     global BounceDetector, MiniMapVisualizer
     global PlayerPoseVisualizer, StatsVisualizer, RTMPoseProcessor, YOLOPoseProcessor, YOLOPersonDetector, vap
     global JsonlDetectionWriter, write_json, SCHEMA_VERSION
+    global CourtKeypointDetector, COURT_KEYPOINTS_M, CameraModel
+    global compute_shot_metrics_entries, write_shot_metrics, call_bounce
+    global TrackNetBallDetector, TrackNetBallTrackerAdapter
 
     yolo_config_dir = os.path.join(tempfile.gettempdir(), "good-tennis-ultralytics")
     os.makedirs(yolo_config_dir, exist_ok=True)
@@ -39,6 +43,14 @@ def load_runtime_dependencies():
         from .data.writer import JsonlDetectionWriter as _JsonlDetectionWriter
         from .data.writer import write_json as _write_json
         from .data.writer import SCHEMA_VERSION as _SCHEMA_VERSION
+        from .court.keypoint_detector import CourtKeypointDetector as _CourtKeypointDetector
+        from .court.keypoint_detector import COURT_KEYPOINTS_M as _COURT_KEYPOINTS_M
+        from .court.camera import CameraModel as _CameraModel
+        from .analysis.shot_pipeline import compute_shot_metrics_entries as _compute_shot_metrics_entries
+        from .analysis.shot_pipeline import write_shot_metrics as _write_shot_metrics
+        from .analysis.line_call import call_bounce as _call_bounce
+        from .detection.tracknet_ball import TrackNetBallDetector as _TrackNetBallDetector
+        from .detection.tracknet_ball import TrackNetBallTrackerAdapter as _TrackNetBallTrackerAdapter
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             f"Missing Python dependency: {exc.name}. "
@@ -74,6 +86,14 @@ def load_runtime_dependencies():
     JsonlDetectionWriter = _JsonlDetectionWriter
     write_json = _write_json
     SCHEMA_VERSION = _SCHEMA_VERSION
+    CourtKeypointDetector = _CourtKeypointDetector
+    COURT_KEYPOINTS_M = _COURT_KEYPOINTS_M
+    CameraModel = _CameraModel
+    compute_shot_metrics_entries = _compute_shot_metrics_entries
+    write_shot_metrics = _write_shot_metrics
+    call_bounce = _call_bounce
+    TrackNetBallDetector = _TrackNetBallDetector
+    TrackNetBallTrackerAdapter = _TrackNetBallTrackerAdapter
 
 class TennisAnalysisSystem:
     def __init__(self, video_path, show_display=True, 
@@ -89,7 +109,10 @@ class TennisAnalysisSystem:
                  show_pose_roi=True,
                  court_detection='auto-fallback', show_bounce_detection=True,
                  bounce_classifier_path='', show_mini_map=True,
-                 court_match_width=320):
+                 court_match_width=320,
+                 ball_detector='yolo', tracknet_model_path='weights/tracknet_ball.pt',
+                 court_calibration='keypoints', keypoint_model_path='weights/court_keypoints.pt',
+                 shot_metrics=True, line_call='doubles'):
         self.video_path = video_path
         self.show_display = show_display
         self.language = language
@@ -107,6 +130,15 @@ class TennisAnalysisSystem:
         self.bounce_classifier_path = bounce_classifier_path
         self.court_match_width = court_match_width
 
+        # Task 10: shot metrics / spin / line calling 主流程接线
+        self.ball_detector = ball_detector  # 'yolo' | 'tracknet'
+        self.tracknet_model_path = tracknet_model_path
+        self.court_calibration = court_calibration  # 'keypoints' | 'homography'（强制降级）
+        self.keypoint_model_path = keypoint_model_path
+        self.enable_shot_metrics = bool(shot_metrics)
+        self.line_call_mode = None if line_call in (None, 'off') else line_call  # None = 跳过 call_bounce
+        self.camera_dict = None
+
 
         self.show_skeletons = show_skeletons
         self.show_player_trajectories = show_player_trajectories
@@ -123,13 +155,19 @@ class TennisAnalysisSystem:
                 f"Input video not found: {self.video_path}\n"
                 "Pass a valid video file with --video-path."
             )
-        if not os.path.exists(self.ball_model_path):
+        if self.ball_detector == 'yolo' and not os.path.exists(self.ball_model_path):
             raise FileNotFoundError(
                 f"Ball detection model not found: {self.ball_model_path}\n"
                 "Download or train a YOLO tennis ball model and place it at "
                 "weights/tennis-ball.pt, or pass its path with --ball-model."
             )
-        
+        if self.ball_detector == 'tracknet' and not os.path.exists(self.tracknet_model_path):
+            raise FileNotFoundError(
+                f"TrackNet ball detection model not found: {self.tracknet_model_path}\n"
+                "Download the TrackNet weights and place them at weights/tracknet_ball.pt, "
+                "or pass --tracknet-model."
+            )
+
         self.person_detector = None
         if self.player_detector == 'yolo-person':
             self.rtmpose_processor = None
@@ -141,7 +179,11 @@ class TennisAnalysisSystem:
             self.rtmpose_processor = YOLOPoseProcessor(model_path=self.yolo_pose_model)
         else:
             self.rtmpose_processor = RTMPoseProcessor(mode=self.pose_mode, pose_family=self.pose_family)
-        self.yolo_ball_model = YOLO(self.ball_model_path)
+
+        if self.ball_detector == 'tracknet':
+            self.yolo_ball_model = None
+        else:
+            self.yolo_ball_model = YOLO(self.ball_model_path)
 
         self.last_stats_update_frame = 0
 
@@ -158,6 +200,7 @@ class TennisAnalysisSystem:
         self.detections_path = os.path.join(self.save_dir, "detections.jsonl")
         self.bounce_events_path = os.path.join(self.save_dir, "bounce_events.json")
         self.cleaned_ball_trajectory_path = os.path.join(self.save_dir, "cleaned_ball_trajectory.json")
+        self.shot_metrics_path = os.path.join(self.save_dir, "shot_metrics.json")
         self.output_video_path = os.path.join(self.save_dir, f"detect_{self.video_name}.mp4")
         self.temp_output_video_path = None
         self.detection_writer = None
@@ -170,12 +213,16 @@ class TennisAnalysisSystem:
         self.end_time = None
         
 
-        self.tennis_ball_tracker = TennisBallTracker(
-            yolo_ball_model=self.yolo_ball_model,
-            trajectory_length=30,
-            show_trajectory=False,
-            show_performance_stats=self.show_performance_stats
-        )
+        if self.ball_detector == 'tracknet':
+            tracknet_detector = TrackNetBallDetector(model_path=self.tracknet_model_path)
+            self.tennis_ball_tracker = TrackNetBallTrackerAdapter(tracknet_detector, trajectory_length=30)
+        else:
+            self.tennis_ball_tracker = TennisBallTracker(
+                yolo_ball_model=self.yolo_ball_model,
+                trajectory_length=30,
+                show_trajectory=False,
+                show_performance_stats=self.show_performance_stats
+            )
         
         self.player_pose_visualizer = PlayerPoseVisualizer(
             rtmpose_processor=self.rtmpose_processor,
@@ -288,7 +335,8 @@ class TennisAnalysisSystem:
                 "height": int(self.frame_height),
             },
             "models": {
-                "tennis_ball": self.ball_model_path,
+                "tennis_ball": self.tracknet_model_path if self.ball_detector == 'tracknet' else self.ball_model_path,
+                "ball_detector": self.ball_detector,
                 "player_detector": self.player_detector,
                 "person": self.person_model if self.player_detector == 'yolo-person' else None,
                 "person_tracker": self.person_tracker if self.player_detector == 'yolo-person' else None,
@@ -301,6 +349,9 @@ class TennisAnalysisSystem:
                 "bounce_method": "rule_lag20_postprocess" if not self.bounce_classifier_path else "clf_lag20_postprocess",
                 "bounce_classifier": self.bounce_classifier_path,
                 "mini_map": self.show_mini_map,
+                "court_calibration": self.court_calibration,
+                "shot_metrics": self.enable_shot_metrics,
+                "line_call": self.line_call_mode,
             },
             "court": {
                 "template_path": template_path,
@@ -319,7 +370,11 @@ class TennisAnalysisSystem:
                 "detections": self.detections_path,
                 "bounce_events": self.bounce_events_path,
                 "cleaned_ball_trajectory": self.cleaned_ball_trajectory_path,
+                "shot_metrics": self.shot_metrics_path if self.enable_shot_metrics else None,
             },
+            # 相机标定结果要到 _cleanup 阶段（回合切分完才能标定）才有；这里先占位 null，
+            # _patch_metadata_with_camera 会在标定/降级判定完成后回填（Task 10）。
+            "camera": None,
         }
         write_json(self.metadata_path, metadata)
 
@@ -739,6 +794,10 @@ class TennisAnalysisSystem:
             rewrite_detections=True,
         )
         print(f"弹跳后处理完成: {len(events)} 个候选点，结果={self.bounce_events_path}")
+
+        shot_metrics_entries, bounce_line_calls = self._run_shot_and_line_call_pipeline(events)
+        self._patch_metadata_with_camera(self.camera_dict)
+
         if not self.temp_output_video_path or not os.path.exists(self.temp_output_video_path):
             return
 
@@ -750,9 +809,256 @@ class TennisAnalysisSystem:
             trajectory_points=self.bounce_detector.processed_points,
             draw_minimap_bounces=self.show_mini_map,
             draw_processed_trajectory=self.show_tennis_ball_trajectory,
+            bounce_line_calls=bounce_line_calls,
+            shot_hits={entry["hit_frame"]: entry for entry in shot_metrics_entries},
         )
         if os.path.exists(annotated_path):
             os.replace(annotated_path, self.temp_output_video_path)
+
+    # ------------------------------------------------------------------
+    # Task 10: shot metrics / spin / line calling 主流程接线
+    # ------------------------------------------------------------------
+
+    # 回合边界判定阈值：detections.jsonl 只在 is_court=True 的帧写记录（见
+    # _process_frame 的 `if not is_court: return`），同一回合内偶发 1-2 帧误判
+    # 非球场只会留下小缝隙；真正的回合切换需要连续 >= non_court_frames_threshold
+    # (=5) 帧非球场才会翻转 rally_active，此后摄像机通常会离场更久。用大于该
+    # 阈值的间隔帧数作为回合分界，兼顾"容忍瞬时误判"与"识别真实回合切换"。
+    RALLY_GAP_FRAMES = 15
+
+    def _run_shot_and_line_call_pipeline(self, events):
+        """bounce line_call 回填 detections.jsonl + 相机标定 + 逐回合
+        segments/metrics/spin/line_call -> shot_metrics.json。
+
+        返回 (shot_metrics_entries, bounce_line_calls)，供最终视频叠加层复用
+        （避免重复读盘 / 重复调用 call_bounce）。
+        """
+        records = self._load_detection_records()
+
+        bounce_line_calls = {}
+        if self.line_call_mode:
+            for event in events:
+                court = event.get("court")
+                if court is None:
+                    continue
+                verdict, _distance = call_bounce(court, mode=self.line_call_mode)
+                bounce_line_calls[int(event["frame"])] = verdict
+            self._inject_line_call(records, bounce_line_calls)
+        else:
+            print("提示：--line-call off，跳过弹跳判罚 / Notice: --line-call off, skipping bounce line calling")
+
+        shot_metrics_entries = []
+        camera = None
+        if self.enable_shot_metrics:
+            rallies = self._split_records_into_rallies(records)
+            camera = self._calibrate_camera(rallies)
+
+            points_by_frame = {
+                int(point.frame): {
+                    "frame": int(point.frame),
+                    "time_sec": point.time_sec,
+                    "image": point.image,
+                    "court": point.court,
+                }
+                for point in (self.bounce_detector.processed_points or [])
+            }
+            whole_video_positions = self._median_positions(records)
+
+            for rally in rallies:
+                rally_points = [points_by_frame[frame] for frame in rally["frames"] if frame in points_by_frame]
+                rally_bounces = [event for event in events if rally["start"] <= int(event["frame"]) <= rally["end"]]
+                rally_positions = self._median_positions(rally["records"])
+                resolved_positions, missing_sides = self._resolve_player_positions(rally_positions, whole_video_positions)
+                for side in missing_sides:
+                    print(
+                        f"警告：第 {rally['start']}-{rally['end']} 帧回合缺少{side}方球员位置数据，"
+                        f"跳过该方击球分析 / Warning: no player position data for '{side}' side in "
+                        f"rally frames {rally['start']}-{rally['end']}, skipping that side's shots"
+                    )
+                entries = compute_shot_metrics_entries(
+                    rally_points, rally_bounces, resolved_positions, self.fps, camera, self.line_call_mode
+                )
+                if missing_sides:
+                    entries = [entry for entry in entries if entry["hitter"] not in missing_sides]
+                shot_metrics_entries.extend(entries)
+
+            write_shot_metrics(self.shot_metrics_path, shot_metrics_entries)
+            print(f"击球指标计算完成: {len(shot_metrics_entries)} 拍，结果={self.shot_metrics_path}")
+        else:
+            print("提示：--shot-metrics false，跳过击球速度/旋转分析 / Notice: --shot-metrics false, skipping shot speed/spin analysis")
+
+        self.camera_dict = camera.to_dict() if camera is not None else None
+        return shot_metrics_entries, bounce_line_calls
+
+    def _load_detection_records(self):
+        records = []
+        with open(self.detections_path, "r", encoding="utf-8", errors="replace") as file:
+            for line in file:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return records
+
+    def _inject_line_call(self, records, bounce_line_calls):
+        """把 bounce_line_calls 回填进（内存中的）records 的 bounce.line_call，再整体重写
+        detections.jsonl——records 由调用方复用，避免为 line_call 单独多一趟读盘。"""
+        for record in records:
+            bounce = record.get("bounce")
+            if bounce is not None:
+                bounce["line_call"] = bounce_line_calls.get(int(record.get("frame", -1)))
+
+        tmp_path = f"{self.detections_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as file:
+            for record in records:
+                file.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+                file.write("\n")
+        os.replace(tmp_path, self.detections_path)
+
+    def _split_records_into_rallies(self, records):
+        records = sorted(records, key=lambda record: int(record.get("frame", 0)))
+        chunks = []
+        current = []
+        prev_frame = None
+        for record in records:
+            frame = int(record.get("frame", 0))
+            if prev_frame is not None and frame - prev_frame > self.RALLY_GAP_FRAMES:
+                chunks.append(current)
+                current = []
+            current.append(record)
+            prev_frame = frame
+        if current:
+            chunks.append(current)
+
+        rallies = []
+        for chunk in chunks:
+            frames = [int(record.get("frame", 0)) for record in chunk]
+            rallies.append({"records": chunk, "frames": frames, "start": frames[0], "end": frames[-1]})
+        return rallies
+
+    def _median_positions(self, records):
+        """{"upper": [x,y]|None, "lower": [x,y]|None}：该侧无任何 court 数据时为 None（R3）。"""
+        collected = {"upper": [], "lower": []}
+        for record in records:
+            players = record.get("players") or {}
+            for side in ("upper", "lower"):
+                court = (players.get(side) or {}).get("court")
+                if court is not None:
+                    collected[side].append(court)
+
+        result = {}
+        for side, points in collected.items():
+            if not points:
+                result[side] = None
+                continue
+            array = np.array(points, dtype=float)
+            result[side] = [float(np.median(array[:, 0])), float(np.median(array[:, 1]))]
+        return result
+
+    def _resolve_player_positions(self, rally_positions, whole_video_positions):
+        """R3：回合内位置缺失 -> 退化到全视频中位数；全视频也没有 -> 该侧标记 missing，
+        由调用方过滤掉对应 hitter 的 shot_metrics 条目（占位坐标只为让 extract_segments
+        不崩，最终会被丢弃，数值本身不参与任何保留下来的输出）。"""
+        resolved = {}
+        missing = []
+        for side in ("upper", "lower"):
+            value = rally_positions.get(side) or whole_video_positions.get(side)
+            if value is None:
+                missing.append(side)
+                value = [5.485, 0.0] if side == "upper" else [5.485, 23.77]
+            resolved[side] = value
+        return resolved, missing
+
+    def _calibrate_camera(self, rallies):
+        """CourtKeypointDetector 检测（回合中点采样，最多 5 帧）+ CameraModel.calibrate；
+        权重缺失 / 有效关键点 < 6 / 重投影误差 > 15px / --court-calibration homography
+        任一命中都降级为 homography-only（返回 None，shot_metrics 只保留 line_call）。
+        """
+        if self.court_calibration == 'homography':
+            print(
+                "提示：--court-calibration homography 强制单应性降级，跳过相机标定 / "
+                "Notice: --court-calibration homography forces homography-only degrade, "
+                "skipping camera calibration"
+            )
+            return None
+
+        if not os.path.exists(self.keypoint_model_path):
+            print(
+                f"警告：球场关键点权重缺失（{self.keypoint_model_path}），降级为单应性模式 / "
+                f"Warning: court keypoint weights missing ({self.keypoint_model_path}), "
+                "degrading to homography-only mode"
+            )
+            return None
+
+        if not rallies:
+            print("提示：未检测到有效回合，跳过相机标定 / Notice: no valid rallies detected, skipping camera calibration")
+            return None
+
+        sample_rallies = rallies if len(rallies) <= 5 else [
+            rallies[index] for index in np.linspace(0, len(rallies) - 1, 5).round().astype(int)
+        ]
+
+        detector = CourtKeypointDetector(self.keypoint_model_path)
+        cap = cv2.VideoCapture(self.video_path)
+        detections = []
+        try:
+            for rally in sample_rallies:
+                midpoint_frame = (rally["start"] + rally["end"]) // 2
+                cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, midpoint_frame - 1))  # frame 计数 1-indexed
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+                points = detector.detect(frame)
+                if points is not None:
+                    detections.append(points)
+        finally:
+            cap.release()
+
+        if not detections:
+            print(
+                "警告：关键点检测在所有采样帧均失败，降级为单应性模式 / "
+                "Warning: keypoint detection failed on all sampled frames, degrading to homography-only mode"
+            )
+            return None
+
+        stacked = np.stack(detections, axis=0)
+        median_points = np.nanmedian(stacked, axis=0)
+        valid_mask = ~np.isnan(median_points).any(axis=1)
+        valid_count = int(valid_mask.sum())
+        if valid_count < 6:
+            print(
+                f"警告：有效关键点仅 {valid_count} 个（<6），降级为单应性模式 / "
+                f"Warning: only {valid_count} valid keypoints (<6), degrading to homography-only mode"
+            )
+            return None
+
+        image_points = median_points[valid_mask]
+        world_points = COURT_KEYPOINTS_M[valid_mask]
+        camera = CameraModel.calibrate(image_points, world_points, (self.frame_width, self.frame_height))
+        error = camera.reprojection_error(image_points, world_points)
+        if error > 15.0:
+            print(
+                f"警告：重投影误差 {error:.1f}px > 15px，降级为单应性模式 / "
+                f"Warning: reprojection error {error:.1f}px > 15px, degrading to homography-only mode"
+            )
+            return None
+
+        print(
+            f"相机标定成功：{valid_count} 个关键点，重投影误差 {error:.2f}px / "
+            f"Camera calibrated: {valid_count} keypoints, reprojection error {error:.2f}px"
+        )
+        return camera
+
+    def _patch_metadata_with_camera(self, camera_dict):
+        if not os.path.exists(self.metadata_path):
+            return
+        with open(self.metadata_path, "r", encoding="utf-8") as file:
+            metadata = json.load(file)
+        metadata["camera"] = camera_dict
+        write_json(self.metadata_path, metadata)
 
     def analyze_tennis_ball(self, roi_corners, corners):
         """Hit-point analysis is currently disabled."""
