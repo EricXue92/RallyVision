@@ -13,6 +13,8 @@
                 import torch
                 if torch.cuda.is_available():
                     selected = 0
+                elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+                    selected = "mps"
             except Exception:
                 selected = "cpu"
             self.device = selected
