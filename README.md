@@ -22,10 +22,11 @@
 
 ## 📝 更新日志
 
+- **2026-08-23**：阶段三比赛层上线——击球类型分类（规则法）、回合切分、每分判定与自动计分（`--match-scoring`）、比赛统计（`match_stats.json`）、集锦导出（`--highlights`），以及比分修正重算工具 `tools/edit_point.py`（改判任意一分后整场从头重放自动重算）。
 - **2026-08-22**：阶段二能力上线——固定机位相机标定（`--court-calibration`）、击球速度/旋转估计（`--shot-metrics`）、弹跳点 IN/OUT 判罚（`--line-call`）、新增 WASB-SBDT 球检测后端（`--ball-detector wasb`，与 yolo/tracknet 三选一），并提供真实数据球速验证工具 `tools/validate_speed.py`。
 - **2026-07-02**：增加球员位置追踪和自动球场外角点检测
 - **2026-06-22**：整理开源 README，增加网球弹跳点检测。
-- **当前版本**：支持球员检测、网球检测、球场坐标映射、轨迹统计、回合检测、小地图、热力图/散点图、带标注视频输出，以及相机标定、击球速度/旋转估计与落点 IN/OUT 判罚。
+- **当前版本**：支持球员检测、网球检测、球场坐标映射、轨迹统计、回合检测、小地图、热力图/散点图、带标注视频输出，以及相机标定、击球速度/旋转估计、落点 IN/OUT 判罚与比赛层（击球分类/自动计分/统计/集锦/比分修正）。
 - **迭代中**：弹跳检测已含双抛物线亚帧精化；当前重点是真实视频上的球速拟合精度（详见「击球速度/旋转精度与验证」章节的已知精度状态）。
 
 ## 🗺️ 路线图
@@ -44,6 +45,8 @@
 - [x] 弹跳点 IN/OUT 判罚
 - [x] 更多球检测后端（TrackNet、WASB-SBDT）
 - [x] 真实数据验证工具（`tools/validate_speed.py`）
+- [x] 比赛层：击球分类 / 回合切分 / 自动计分 / 统计 / 集锦（`--match-scoring`）
+- [x] 比分修正重算工具（`tools/edit_point.py`）
 - [ ] 更稳定的网球弹跳点识别
 - [ ] 更准确的网球检测模型
 
@@ -58,6 +61,9 @@
 - **相机标定** - `--court-calibration keypoints`（默认）用 14 点球场关键点检测对固定机位视频做完整相机标定（内参+外参），支持击球速度/旋转估计；`--court-calibration homography` 降级为仅单应性映射（无 speed/spin，只有落点判罚）。拍摄中途相机被移动时会自动检测漂移并重新标定（`metadata.json` 记录 `recalibrated_at_frames`）。
 - **击球速度与旋转** - `--shot-metrics true`（默认）基于相机标定 + 物理弹道拟合，计算每拍的球速（km/h）和旋转方向（上旋/下旋/平击），拟合失败的段保留 `fit_ok=false` 并置空数值，不静默丢弃。
 - **落点判罚** - `--line-call singles|doubles|off` 对每个弹跳点做单/双打边线 IN/OUT 判罚，含临界值容差带。
+- **比赛层分析** - `--match-scoring true` 在逐拍指标之上跑完整比赛层：击球类型分类（发球/高压/截击/正手/反手）、回合切分、每分判定（含发球 fault 配对与双误）、自动计分（平分/占先、no-ad、6-6 抢七、best-of 3/5）与比赛统计。击球分类为规则法，正反手判定依赖姿态腕点，遮挡或腕点缺失时诚实记为 `unknown`，不硬猜。
+- **比分修正重算** - `tools/edit_point.py` 可改判任意一分：计分状态机完整保存每分历史，改分后整场从头重放，局分/盘分/统计全部自动重算。
+- **集锦导出** - `--highlights true` 把长回合与制胜分回合剪成带记分板叠加的集锦视频（需系统安装 ffmpeg，缺失时警告跳过不中断）。
 - **球员位置追踪** - 记录球员球场坐标、移动轨迹、速度和距离。
 - **回合检测** - 根据连续球场视图自动判断回合开始和结束，并在视频叠加层和检测数据中记录回合编号。
 - **弹跳点检测** - 视频处理完成后，按整段网球轨迹做离群点清理、插值、速度计算，默认使用规则评分；干净球轨迹和弹跳点会在主画面和小地图上显示。
@@ -226,7 +232,29 @@ uv run main.py --video-path videos/demo.mp4 --template-path templates/demo.png -
 --visualize-positions true|false 是否生成热力图和散点图，默认 true
 --audio true|false              是否保留原视频音频，默认 true
 --language {zh,en}              选择界面语言
+--match-scoring true|false      是否跑比赛层分析（击球类型/回合/每分判定/计分/统计），默认 false
+--first-server upper|lower      首局发球方，默认 lower（离相机近的一方）
+--upper-hand right|left         upper 方持拍手，默认 right
+--lower-hand right|left         lower 方持拍手，默认 right
+--best-of 3|5                   几盘制，默认 3
+--no-ad true|false              是否用 no-ad（平分后金球）计分，默认 false
+--highlights true|false         是否导出集锦视频（需 --match-scoring true 且系统装有 ffmpeg），默认 false
 ```
+
+### 比赛层与比分修正
+
+```bash
+# 跑比赛层：击球分类 → 回合切分 → 每分判定 → 自动计分 → 统计（可选集锦）
+uv run main.py --video-path videos/demo.mp4 --match-scoring true --first-server lower --highlights true
+
+# 列出每一分（序号 / 帧区间 / 赢家 / 原因 / 该分开始前的比分）
+uv run tools/edit_point.py --output-dir outputs/demo --list
+
+# 改判第 12 分给 upper：状态机从头重放，match_score.json 与 match_stats.json 自动重算
+uv run tools/edit_point.py --output-dir outputs/demo --point 12 --winner upper
+```
+
+自动判定不可能全对（视频截断、临界判罚等会产生 `reason=unknown` 的分）——这些分不会被静默丢弃，照样计入比分；判错的分用修正工具人工改判，改一分即整场自动重算。
 
 ## 📦 输出结果
 
@@ -236,7 +264,10 @@ uv run main.py --video-path videos/demo.mp4 --template-path templates/demo.png -
 - `detections.jsonl`：逐帧检测记录，包含回合编号、球员、手部、球场坐标、速度、网球坐标和后处理弹跳点事件。
 - `bounce_events.json`：整段轨迹后处理得到的弹跳点列表，包含帧号、图像坐标、置信度和诊断信息。
 - `cleaned_ball_trajectory.json`：过滤和短缺失插值后的球轨迹，最终视频使用这份轨迹绘制。
-- `shot_metrics.json`：`--shot-metrics true` 时生成，逐拍击球指标（`hit_frame`/`bounce_frame`/`hitter`/`speed_kmh`/`spin_coeff`/`spin_label`/`spin_confidence`/`line_call`/`fit_ok`/`rms_px`）；拟合失败的拍（`fit_ok=false`）保留在列表里，`speed_kmh`/`spin_coeff` 置 `null`，不静默丢弃。
+- `shot_metrics.json`：`--shot-metrics true` 时生成，逐拍击球指标（`hit_frame`/`bounce_frame`/`hitter`/`speed_kmh`/`spin_coeff`/`spin_label`/`spin_confidence`/`line_call`/`fit_ok`/`rms_px`）；拟合失败的拍（`fit_ok=false`）保留在列表里，`speed_kmh`/`spin_coeff` 置 `null`，不静默丢弃；`--match-scoring true` 时每拍追加 `shot_type` 字段（serve/overhead/volley/forehand/backhand/unknown）。
+- `match_score.json`：`--match-scoring true` 时生成——每分历史（`history`）、逐分比分快照（`score_timeline`）、每分判定明细（`points`：赢家/原因/帧区间/一发二发）与终局比分（`final`）；`tools/edit_point.py` 改判后原地重写。
+- `match_stats.json`：`--match-scoring true` 时生成——六类击球计数与所在分胜率、发球统计（一发成功率/双误/均速/极速）、回合长度直方图、弹跳热图。
+- `highlights.mp4`：`--highlights true` 时生成的集锦视频（长回合 + 制胜分回合，带记分板叠加）。
 - `detect_<视频文件名>.mp4`：带骨架、轨迹、统计信息、小地图和回合编号叠加层的输出视频。
 - `court_annotations.txt`：球场标注坐标缓存。
 - `auto_court_preview.png`：自动球场检测预览图，触发自动检测候选时生成。
