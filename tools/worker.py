@@ -15,6 +15,12 @@ import time
 
 import httpx
 
+# 按路径调用(README 文档的 `uv run tools/worker.py`)时 Python 只把本文件所在的
+# tools/ 目录塞进 sys.path[0],仓库根目录不在里面,下面的绝对导入会
+# ModuleNotFoundError。显式把仓库根目录加进 sys.path,兼容脚本路径调用和
+# `python -m tools.worker` 两种起法。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from tools.report_builder import ReportBuildError, build_report, has_highlights
 
 BACKEND_BASE = os.environ.get("RV_BACKEND_BASE", "https://api.letstennis.app")
