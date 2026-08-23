@@ -322,8 +322,13 @@ class TennisAnalysisSystem:
         self.total_frames = total_frames
 
 
-        template_path = self._get_template_path()
-        template_gray, template_color = self._load_template(template_path, cap)
+        template_frame = self._select_template_frame_from_video()
+        if template_frame is not None:
+            template_path = "<video-frame>"   # metadata 溯源标记,不是文件路径
+            template_gray, template_color = self._template_from_frame(template_frame)
+        else:
+            template_path = self._get_template_path()
+            template_gray, template_color = self._load_template(template_path, cap)
         
 
         self.frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -636,8 +641,66 @@ class TennisAnalysisSystem:
         template_gray = cv2.resize(template_gray, (frame_width, frame_height))
         template_color = cv2.resize(template_color, (frame_width, frame_height))
         template_match_gray = self._resize_court_match_gray(template_gray)
-        
+
         return template_match_gray, template_color
+
+    # 视频自适应模板:开场均匀采样 TEMPLATE_SAMPLE_COUNT 帧跑球场关键点模型,选有效
+    # 关键点最多的帧当 is_court_view 的匹配模板。动机(生产事故 job 60aa7c7f):写死的
+    # templates/demo.png 与用户视频观感差异大时(实测美网蓝场转播),0.75 阈值会把全部
+    # 帧拒掉 → 零检测。用视频自己的球场帧做模板,场地颜色/光线不再影响判定,而转播
+    # 素材里的回放/观众镜头依然会被正确过滤(与球场帧不像)。
+    TEMPLATE_SAMPLE_COUNT = 30
+
+    def _select_template_frame_from_video(self):
+        """返回选中的 BGR 模板帧;权重缺失/无帧/全部检不出球场时返回 None(回退 demo 模板)。"""
+        if not os.path.exists(self.keypoint_model_path):
+            print(
+                f"提示:球场关键点权重缺失({self.keypoint_model_path}),模板回退 demo 图 / "
+                "Notice: court keypoint weights missing, falling back to demo template"
+            )
+            return None
+        if self.total_frames <= 0:
+            return None
+
+        detector = CourtKeypointDetector(self.keypoint_model_path)
+        cap = cv2.VideoCapture(self.video_path)
+        best_frame, best_valid, best_index = None, 0, 0
+        try:
+            step = max(1, self.total_frames // self.TEMPLATE_SAMPLE_COUNT)
+            for frame_index in range(1, self.total_frames + 1, step):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index - 1)
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+                points = detector.detect(frame)
+                if points is None:
+                    continue
+                valid = int(np.count_nonzero(~np.isnan(points[:, 0])))
+                if valid > best_valid:
+                    best_frame, best_valid, best_index = frame, valid, frame_index
+                    if valid == 14:
+                        break
+        finally:
+            cap.release()
+
+        if best_frame is None:
+            print(
+                "提示:采样帧均未检出球场关键点,模板回退 demo 图(若确非球场视频,"
+                "后续会以 court_not_detected 收尾)/ no court keypoints in sampled frames, "
+                "falling back to demo template"
+            )
+            return None
+        print(
+            f"模板帧选定: 第 {best_index} 帧({best_valid}/14 关键点)/ "
+            f"template frame selected: frame {best_index} ({best_valid}/14 keypoints)"
+        )
+        return best_frame
+
+    def _template_from_frame(self, frame):
+        """把选中的视频帧加工成 (匹配用降采样灰度图, 全尺寸彩色图),与 _load_template 同构。"""
+        template_color = frame.copy()
+        template_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return self._resize_court_match_gray(template_gray), template_color
 
     def _resize_court_match_gray(self, gray_frame):
         if self.court_match_width <= 0 or gray_frame.shape[1] <= self.court_match_width:
