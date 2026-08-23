@@ -274,6 +274,39 @@ uv run tools/edit_point.py --output-dir outputs/demo --point 12 --winner upper
 - `position_visualizations/heatmaps/`：球员位置热力图。
 - `position_visualizations/scatter_plots/`：球员位置散点图。
 
+## 🤖 Worker 模式
+
+面向生产环境的另一种运行方式：不在本机手动跑 `main.py`，而是作为长驻/单次进程，向 TennisMatch backend 轮询领取分析任务、本机跑 pipeline、把 `report.json` 契约（`tools/report_builder.py` 聚合）和集锦视频回传给 backend。当前仅支持单打（`--line-call singles` 恒写死，见 `tools/worker.py`）。
+
+### 环境变量
+
+- `RV_BACKEND_BASE`：backend 地址，默认 `https://api.letstennis.app`。
+- `RV_WORKER_TOKEN`：worker 鉴权 token（随每个请求带 `X-Worker-Token` 头），**必填**——缺失直接报错退出（exit code 2）。
+- `RV_WORK_DIR`：本地工作目录根路径，默认 `~/rallyvision-jobs`。
+
+### 用法
+
+```bash
+# 领一单跑完退出（内测手动模式）
+RV_WORKER_TOKEN=xxx uv run tools/worker.py --once
+
+# 常驻轮询：队列为空或一单处理完后，每 300 秒（默认，可用 --interval 调整）再领一次
+RV_WORKER_TOKEN=xxx uv run tools/worker.py --loop --interval 300
+```
+
+### work_dir 结构
+
+每个任务对应 `<RV_WORK_DIR>/<job_id>/`（默认 `~/rallyvision-jobs/<job_id>/`）：
+
+- `input.mp4`：从 backend 下发的 `video_url` 下载的原始视频。
+- `outputs/`：pipeline 完整输出目录，等价于本地跑 `main.py --output-dir` 的产物——`metadata.json`/`match_score.json`/`match_stats.json`/`shot_metrics.json`/`detections.jsonl`/`highlights.mp4` 等（字段说明见上方「输出结果」）。
+
+视频与输出**不会被自动清理**，内测期本身就是排障素材。
+
+### 失败排查
+
+一单失败（下载失败、pipeline 子进程非零退出、`report_builder` 聚合失败等）时，worker 会把异常归类成 `error_code`（`court_not_detected` / `pipeline_error`）回传给 backend 的 `/fail` 端点，同时**保留本地现场**——不清理 `<work_dir>/<job_id>/` 下的 `input.mp4` 和 `outputs/`。排障时直接进 `~/rallyvision-jobs/<job_id>/` 检查有没有生成 `metadata.json`/`match_score.json` 等中间产物，或用相同参数（参考 `tools/worker.py::build_cli_args` 拼出的 argv）手动重跑 `main.py` 复现。若连失败上报本身也失败（网络问题等），只打日志不重试——任务会在 backend 侧 24 小时后自愈重置回队列。
+
 ## 🎯 击球速度/旋转精度与验证
 
 ### 精度声明

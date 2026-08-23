@@ -24,6 +24,7 @@ dependencies = [
     "sktime>=0.18.0",
     "openpyxl>=3.0.0",
     "lap>=0.5.12",
+    "httpx>=0.28.1",
 ]
 
 [tool.uv]

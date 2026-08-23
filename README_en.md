@@ -312,6 +312,39 @@ Default output directory: `outputs/<video_name>/`
 - `position_visualizations/heatmaps/`: Player position heatmaps.
 - `position_visualizations/scatter_plots/`: Player position scatter plots.
 
+## 🤖 Worker Mode
+
+An alternative way to run the pipeline in production: instead of running `main.py` by hand on this machine, run a long-lived or one-shot process that polls the TennisMatch backend for analysis jobs, runs the pipeline locally, and reports the `report.json` contract (aggregated by `tools/report_builder.py`) plus the highlight video back to the backend. Singles only for now (`--line-call singles` is hard-coded — see `tools/worker.py`).
+
+### Environment variables
+
+- `RV_BACKEND_BASE`: backend base URL, defaults to `https://api.letstennis.app`.
+- `RV_WORKER_TOKEN`: worker auth token, sent as the `X-Worker-Token` header on every request. **Required** — the process exits immediately (exit code 2) if it's missing.
+- `RV_WORK_DIR`: root of the local work directory, defaults to `~/rallyvision-jobs`.
+
+### Usage
+
+```bash
+# Claim one job, run it, then exit (manual mode for early testing)
+RV_WORKER_TOKEN=xxx uv run tools/worker.py --once
+
+# Poll continuously: sleep 300s (default, override with --interval) between claims
+RV_WORKER_TOKEN=xxx uv run tools/worker.py --loop --interval 300
+```
+
+### work_dir layout
+
+Each job gets `<RV_WORK_DIR>/<job_id>/` (defaults to `~/rallyvision-jobs/<job_id>/`):
+
+- `input.mp4`: the source video, downloaded from the `video_url` the backend hands back.
+- `outputs/`: the full pipeline output directory — the same artifacts you'd get from a local `main.py --output-dir` run (`metadata.json`/`match_score.json`/`match_stats.json`/`shot_metrics.json`/`detections.jsonl`/`highlights.mp4`, etc.; see "Outputs" above for field details).
+
+Videos and outputs are **never auto-deleted** — during early testing they're exactly the debugging material you need.
+
+### Failure triage
+
+When a job fails (download error, non-zero pipeline exit, `report_builder` aggregation failure, etc.), the worker classifies the exception into an `error_code` (`court_not_detected` / `pipeline_error`) and reports it to the backend's `/fail` endpoint, while **keeping the local artifacts** — `input.mp4` and `outputs/` under `<work_dir>/<job_id>/` are not cleaned up. To triage, go straight into `~/rallyvision-jobs/<job_id>/` and check which intermediate files exist (`metadata.json`, `match_score.json`, ...), or reproduce by rerunning `main.py` manually with the same arguments (the argv `tools/worker.py::build_cli_args` would have built). If even reporting the failure fails (e.g. a network blip), the worker just logs it and doesn't retry — the job self-heals back into the queue on the backend side after 24 hours.
+
 ## 🎯 Shot Speed/Spin Accuracy and Validation
 
 ### Accuracy statement

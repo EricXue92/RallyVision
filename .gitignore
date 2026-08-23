@@ -18,6 +18,7 @@ tools/*
 !tools/edit_point.py
 !tools/demo_manifest.json
 !tools/report_builder.py
+!tools/worker.py
 outputs/
 datasets/
 *.log
