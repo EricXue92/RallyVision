@@ -370,7 +370,20 @@ class TennisAnalysisSystem:
         print(f"原始视频时长: {video_duration:.2f} 秒")
         print(f"处理耗时: {processing_time:.2f} 秒")
         print(f"处理速度比: {processing_time/video_duration:.2f}x")
-        
+
+        if detect_frame_count == 0:
+            # 全程没有一帧通过 is_court_view 模板匹配:没有任何可分析数据。跳过弹跳
+            # 后处理/比赛层/视频合成(它们会在空 temp 视频上二次崩溃),只释放资源后
+            # 以退出码 0 结束——match_score/match_stats 不落盘,worker 的 report_builder
+            # 会据此上报 court_not_detected;若在这里非零退出,worker 只能归为
+            # pipeline_error,用户端就丢失了「未识别到球场画面」这个具体原因。
+            print(
+                f"未识别到球场画面: 0/{frame_count} 帧通过模板匹配,跳过后处理 / "
+                f"no court-view frames detected ({frame_count} frames scanned), skipping post-processing"
+            )
+            self._release_capture_resources(cap)
+            return
+
         self._cleanup(cap)
 
     def _active_ball_model_path(self):
@@ -873,8 +886,8 @@ class TennisAnalysisSystem:
         )
         return preview
 
-    def _cleanup(self, cap):
-        """Clean up resources and merge audio when needed."""
+    def _release_capture_resources(self, cap):
+        """只释放读写资源,不跑任何后处理(零球场帧提前收尾与 _cleanup 共用)。"""
         if self.detection_writer is not None:
             self.detection_writer.close()
             self.detection_writer = None
@@ -884,6 +897,10 @@ class TennisAnalysisSystem:
             time.sleep(1)
 
         cap.release()
+
+    def _cleanup(self, cap):
+        """Clean up resources and merge audio when needed."""
+        self._release_capture_resources(cap)
 
         if self.show_bounce_detection and self.bounce_detector is not None:
             self._finalize_bounce_detection()

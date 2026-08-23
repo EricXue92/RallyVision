@@ -400,6 +400,10 @@ class BounceDetector:
         return points
 
     def _remove_outliers(self, points):
+        # 空输入直接返回:np.array([]) 是 1-D,下面的 coords[:, 0] 会 IndexError
+        # (生产踩过:整段视频没有一帧通过球场画面判定 → 零检测记录)
+        if not points:
+            return []
         cleaned = [TrajectoryPoint(**point.__dict__) for point in points]
         coords = np.array(
             [point.image if point.image is not None else [np.nan, np.nan] for point in cleaned],
