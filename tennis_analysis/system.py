@@ -691,7 +691,11 @@ class TennisAnalysisSystem:
                     f"confidence={detected['confidence']:.2f}, "
                     f"lines={detected['line_count']}, preview={preview_path}"
                 )
-                if self._confirm_auto_court_detection(template_color, detected):
+                # --display false(worker/headless 模式):不弹确认框阻塞等 cv2.waitKey(0)
+                # 键盘输入,直接采信自动检测结果。这是 Phase 4a worker 冒烟测试发现的坑——
+                # show_display 原本只控制主处理窗口,没管到这个独立的确认弹窗,导致 worker
+                # 每个任务都会在这里死等键盘输入,永远跑不完。
+                if not self.show_display or self._confirm_auto_court_detection(template_color, detected):
                     self.court_detection_result = {
                         "status": "auto",
                         "accepted": True,
@@ -716,7 +720,7 @@ class TennisAnalysisSystem:
                     f"confidence={candidate['confidence']:.2f}, "
                     f"lines={candidate['line_count']}, preview={preview_path}"
                 )
-                if self._confirm_auto_court_detection(template_color, candidate):
+                if not self.show_display or self._confirm_auto_court_detection(template_color, candidate):
                     self.court_detection_result = {
                         "status": "auto_low_confidence_accepted",
                         "accepted": True,
@@ -755,6 +759,15 @@ class TennisAnalysisSystem:
                     "diagnostics": detector.last_diagnostics,
                 }
 
+        if not self.show_display:
+            # 同上:headless 模式没有鼠标可点 4 个角点,annotate_court() 会开窗口
+            # 死等鼠标事件。auto-detection 完全没结果时没有退路,只能显式失败,
+            # 不能悄悄挂起——worker 侧靠这个异常上报 error_code 给 backend。
+            raise RuntimeError(
+                "Court annotation needs interactive manual corner-clicking but "
+                "--display is false (headless/worker mode), and auto-detection did "
+                "not produce a usable result for this footage."
+            )
         corners, roi_corners, mid_height = annotate_court(template_color)
         if self.court_detection_result is None:
             self.court_detection_result = {
