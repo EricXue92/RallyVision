@@ -125,3 +125,100 @@ def test_headless_with_no_detection_raises_instead_of_blocking_on_manual_click(m
 
     assert proxy.wait_key_calls == []
     assert proxy.named_window_calls == []
+
+
+def _candidate_result():
+    """detector.detect() 判定不够置信,靠 diagnostics 兜底出来的低置信度候选结果——
+    交互模式下这本来就是要弹窗人工确认的那一档,跟 detected 分支不是同一回事。"""
+    return {
+        "corners": [(5, 5), (600, 5), (600, 300), (5, 300)],
+        "roi_corners": [(0, 0), (600, 300)],
+        "mid_height": 150,
+        "line_count": 3,
+        "confidence": 0.31,
+        "diagnostics": {},
+    }
+
+
+def test_headless_low_confidence_candidate_raises_instead_of_auto_accepting(monkeypatch, tmp_path):
+    """Review finding(coordinator-mandated 修复):headless 只能自动采信过了
+    detector min_confidence 门槛的 `detected` 分支;`candidate` 是交互模式下本来就
+    要弹窗人工确认的低置信度兜底结果,report.json 冻结契约里没有 confidence/status
+    字段区分好坏检测,headless 下绝不能像 `detected` 分支一样静默采信——必须显式
+    失败(用户拿 error_code 去重录),而不是产出一份可能全错但看起来正常的报告。"""
+    candidate = _candidate_result()
+    proxy = _RecordingCV2Proxy(system_module.cv2 if hasattr(system_module, "cv2") else __import__("cv2"))
+    monkeypatch.setattr(system_module, "cv2", proxy, raising=False)
+    monkeypatch.setattr(system_module, "np", np, raising=False)
+    monkeypatch.setattr(
+        system_module, "CourtLineAutoDetector",
+        lambda: _FakeAutoDetector(None), raising=False,
+    )
+
+    system = _headless_system(tmp_path)
+    # detect() 返回 None,让流程走到 candidate = _candidate_from_diagnostics(...)；
+    # 直接在实例上打桩这个方法,跳过它内部真实的 compute_expanded_roi 角点数学
+    # (跟这条回归无关,不需要真的算)。
+    monkeypatch.setattr(system, "_candidate_from_diagnostics", lambda _tc, _diag: candidate)
+    template_color = np.zeros((360, 640, 3), dtype=np.uint8)
+
+    with pytest.raises(RuntimeError, match=r"[Ll]ow confidence|置信度偏低"):
+        system._detect_or_annotate_court(template_color)
+
+    # 跟坑 2 的修复一样:headless 下绝不能弹窗/阻塞等键盘
+    assert proxy.wait_key_calls == []
+    assert proxy.imshow_calls == []
+    assert proxy.named_window_calls == []
+    assert system.court_detection_result["accepted"] is False
+    assert system.court_detection_result["confidence"] == candidate["confidence"]
+
+
+def test_headless_high_confidence_detected_still_auto_accepts(monkeypatch, tmp_path):
+    """跟上面低置信度的 candidate 分支对比:detected 分支已经过 detector 的
+    min_confidence 门槛,headless 下应该继续保持之前的行为——直接采信,不因为这次
+    review 收紧了 candidate 分支就连带把 detected 分支也改严。"""
+    detected = _detected_result()
+    proxy = _RecordingCV2Proxy(system_module.cv2 if hasattr(system_module, "cv2") else __import__("cv2"))
+    monkeypatch.setattr(system_module, "cv2", proxy, raising=False)
+    monkeypatch.setattr(system_module, "np", np, raising=False)
+    monkeypatch.setattr(
+        system_module, "CourtLineAutoDetector",
+        lambda: _FakeAutoDetector(detected), raising=False,
+    )
+
+    system = _headless_system(tmp_path)
+    template_color = np.zeros((360, 640, 3), dtype=np.uint8)
+
+    corners, roi_corners, mid_height = system._detect_or_annotate_court(template_color)
+
+    assert corners == detected["corners"]
+    assert system.court_detection_result["status"] == "auto"
+    assert system.court_detection_result["accepted"] is True
+    assert proxy.wait_key_calls == []
+
+
+def test_interactive_low_confidence_candidate_still_prompts_for_human_confirmation(monkeypatch, tmp_path):
+    """Coordinator ruling:交互模式的人工确认弹窗必须原样保留,不能被这次收紧误伤。"""
+    candidate = _candidate_result()
+    proxy = _RecordingCV2Proxy(system_module.cv2 if hasattr(system_module, "cv2") else __import__("cv2"))
+    monkeypatch.setattr(system_module, "cv2", proxy, raising=False)
+    monkeypatch.setattr(system_module, "np", np, raising=False)
+    monkeypatch.setattr(
+        system_module, "CourtLineAutoDetector",
+        lambda: _FakeAutoDetector(None), raising=False,
+    )
+
+    system = _headless_system(tmp_path)
+    system.show_display = True  # 交互模式
+    monkeypatch.setattr(system, "_candidate_from_diagnostics", lambda _tc, _diag: candidate)
+    template_color = np.zeros((360, 640, 3), dtype=np.uint8)
+
+    corners, roi_corners, mid_height = system._detect_or_annotate_court(template_color)
+
+    # proxy.waitKey 固定返回 13(Enter/接受)——证明弹窗确认流程真的跑了一遍
+    # (namedWindow/imshow/waitKey 都被调用),而不是被短路跳过。
+    assert corners == candidate["corners"]
+    assert proxy.wait_key_calls == [0]
+    assert proxy.named_window_calls
+    assert system.court_detection_result["status"] == "auto_low_confidence_accepted"
+    assert system.court_detection_result["accepted"] is True

@@ -720,7 +720,15 @@ class TennisAnalysisSystem:
                     f"confidence={candidate['confidence']:.2f}, "
                     f"lines={candidate['line_count']}, preview={preview_path}"
                 )
-                if not self.show_display or self._confirm_auto_court_detection(template_color, candidate):
+                # 跟上面 detected 分支不对称,是故意的:detected 已经过 detector 的
+                # min_confidence 门槛,headless 可以放心自动采信;candidate 恰恰是
+                # 「置信度不够,交互模式下本来就要弹窗人工确认」的低置信度兜底结果。
+                # report.json 冻结契约里没有 confidence/status 字段,一份低置信度球场
+                # 标定产出的报告跟正常报告长得一模一样——headless 下悄悄采信,等于让
+                # 一份可能全错的报告蒙混过关。所以这里跟 detected 分支反着来:headless
+                # 必须显式失败(置信度偏低/low confidence),不能自动接受;交互模式的
+                # 人工确认弹窗原样保留不变。
+                if self.show_display and self._confirm_auto_court_detection(template_color, candidate):
                     self.court_detection_result = {
                         "status": "auto_low_confidence_accepted",
                         "accepted": True,
@@ -729,6 +737,22 @@ class TennisAnalysisSystem:
                         "diagnostics": candidate.get("diagnostics"),
                     }
                     return candidate["corners"], candidate["roi_corners"], candidate["mid_height"]
+
+                if not self.show_display:
+                    self.court_detection_result = {
+                        "status": "auto_low_confidence_rejected",
+                        "accepted": False,
+                        "confidence": candidate["confidence"],
+                        "preview": preview_path,
+                        "diagnostics": candidate.get("diagnostics"),
+                    }
+                    raise RuntimeError(
+                        "Court auto-detection confidence is too low (自动检测置信度偏低, "
+                        f"confidence={candidate['confidence']:.2f}) and --display is false "
+                        "(headless/worker mode): refusing to silently accept a low-confidence "
+                        "court calibration. Re-record with clearer/fully-visible court lines, "
+                        "or run interactively once (--display true) to confirm manually."
+                    )
 
                 self.court_detection_result = {
                     "status": "manual_fallback",
