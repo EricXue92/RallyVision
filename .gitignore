@@ -17,6 +17,7 @@ tools/*
 !tools/validate_speed.py
 !tools/edit_point.py
 !tools/demo_manifest.json
+!tools/report_builder.py
 outputs/
 datasets/
 *.log
