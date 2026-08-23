@@ -20,10 +20,11 @@ Built upon [Good-Tennis](https://github.com/yo-WASSUP/Good-Tennis) (Apache 2.0)
 
 ## 📝 Changelog
 
+- **2026-08-23**: Phase-3 match layer shipped — rule-based shot-type classification, rally segmentation, per-point inference with automatic scoring (`--match-scoring`), match statistics (`match_stats.json`), highlight reel export (`--highlights`), and the point-editing tool `tools/edit_point.py` (edit any point and the whole match is replayed and recalculated).
 - **2026-08-22**: Phase-2 capabilities shipped — fixed-camera calibration (`--court-calibration`), shot speed/spin estimation (`--shot-metrics`), bounce IN/OUT line calling (`--line-call`), a new WASB-SBDT ball-detection backend (`--ball-detector wasb`, alongside yolo/tracknet), and a real-data speed validation tool `tools/validate_speed.py`.
 - **2026-07-02**: Added player position tracking and automatic court outer-corner detection.
 - **2026-06-22**: Organized the open-source README and added tennis ball bounce detection.
-- **Current version**: Supports player detection, tennis ball detection, court coordinate mapping, trajectory statistics, rally detection, mini-map overlays, heatmaps/scatter plots, annotated video output, plus camera calibration, shot speed/spin estimation, and bounce IN/OUT line calling.
+- **Current version**: Supports player detection, tennis ball detection, court coordinate mapping, trajectory statistics, rally detection, mini-map overlays, heatmaps/scatter plots, annotated video output, plus camera calibration, shot speed/spin estimation, bounce IN/OUT line calling, and the match layer (shot classification/auto scoring/stats/highlights/point editing).
 - **In progress**: Bounce detection now includes dual-parabola sub-frame refinement; the current focus is real-video speed-fit accuracy (see the known accuracy status in "Shot Speed/Spin Accuracy and Validation").
 
 ## 🗺️ Roadmap
@@ -42,6 +43,8 @@ Built upon [Good-Tennis](https://github.com/yo-WASSUP/Good-Tennis) (Apache 2.0)
 - [x] Bounce point IN/OUT line calling
 - [x] Additional ball-detection backends (TrackNet, WASB-SBDT)
 - [x] Real-data validation tooling (`tools/validate_speed.py`)
+- [x] Match layer: shot classification / rally segmentation / auto scoring / stats / highlights (`--match-scoring`)
+- [x] Point-editing tool with full replay recalculation (`tools/edit_point.py`)
 - [ ] More stable tennis ball bounce point recognition
 - [ ] More accurate tennis ball detection model
 - [ ] Batch video analysis workflow
@@ -57,6 +60,9 @@ Built upon [Good-Tennis](https://github.com/yo-WASSUP/Good-Tennis) (Apache 2.0)
 - **Camera calibration** - `--court-calibration keypoints` (default) uses 14-point court keypoint detection to run a full fixed-camera calibration (intrinsics + extrinsics) for shot speed/spin estimation; `--court-calibration homography` degrades to homography-only mapping (no speed/spin, line calling only). If the camera is bumped mid-recording, drift is auto-detected and the camera is re-calibrated (`metadata.json` records `recalibrated_at_frames`).
 - **Shot speed and spin** - `--shot-metrics true` (default) fits each shot's 3D ball trajectory against the calibrated camera and physics model, computing per-shot speed (km/h) and spin direction (topspin/slice/flat). Segments where the fit fails (`fit_ok=false`) are kept in the output with `null` values rather than silently dropped.
 - **Bounce line calling** - `--line-call singles|doubles|off` calls each bounce point IN/OUT against singles or doubles sidelines, with a close-call tolerance band.
+- **Match-layer analysis** - `--match-scoring true` runs the full match layer on top of the per-shot metrics: shot-type classification (serve/overhead/volley/forehand/backhand), rally segmentation, per-point inference (including serve-fault pairing and double faults), automatic scoring (deuce/advantage, no-ad, 6-6 tiebreak, best-of 3/5), and match statistics. Shot classification is rule-based; forehand/backhand relies on pose wrist keypoints, and shots with occluded or missing wrists are honestly labeled `unknown` rather than guessed.
+- **Point editing with full replay** - `tools/edit_point.py` can re-award any recorded point: the scoring state machine keeps the full point history, and after an edit the whole match is replayed from the start — games, sets, and statistics are all recalculated automatically.
+- **Highlight reel export** - `--highlights true` cuts long rallies and winner points into a highlight video with a scoreboard overlay (requires ffmpeg on the system; degrades to a warning instead of crashing when missing).
 - **Player position tracking** - Records player court coordinates, movement trajectories, speed, and distance.
 - **Rally detection** - Automatically detects rally start/end from consecutive court-view frames, and records rally IDs in both the video overlay and detection data.
 - **Bounce point detection** - After video processing, the full tennis ball trajectory is cleaned, interpolated, and scored by rules by default; the cleaned ball trajectory and bounce points are drawn on the main frame and mini-map.
@@ -263,7 +269,30 @@ The program uses the court template image to determine whether the current frame
 --visualize-positions true|false Generate heatmaps and scatter plots, default true
 --audio true|false              Keep original video audio, default true
 --language {zh,en}              Visualization language
+--match-scoring true|false      Run the match layer (shot types/rallies/point inference/scoring/stats), default false
+--first-server upper|lower      Server of the first game, default lower (the near-camera player)
+--upper-hand right|left         Racket hand of the upper player, default right
+--lower-hand right|left         Racket hand of the lower player, default right
+--best-of 3|5                   Match format, default 3
+--no-ad true|false              Use no-ad (sudden-death deuce) scoring, default false
+--highlights true|false         Export a highlight reel (requires --match-scoring true and ffmpeg), default false
 ```
+
+### Match layer and point editing
+
+```bash
+# Run the match layer: shot types -> rallies -> point inference -> scoring -> stats (highlights optional)
+uv run main.py --video-path videos/demo.mp4 --match-scoring true --first-server lower --highlights true
+
+# List every recorded point (index / frame range / winner / reason / score before the point)
+uv run tools/edit_point.py --output-dir outputs/demo --list
+
+# Re-award point #12 to the upper player: the state machine replays the whole match,
+# rewriting match_score.json and match_stats.json
+uv run tools/edit_point.py --output-dir outputs/demo --point 12 --winner upper
+```
+
+Automatic point inference cannot be perfect (truncated video or close line calls produce points with `reason=unknown`) — such points are never silently dropped and still count toward the score; mis-called points can be fixed with the editing tool, and a single edit recalculates the entire match.
 
 ## 📦 Outputs
 
@@ -273,7 +302,10 @@ Default output directory: `outputs/<video_name>/`
 - `detections.jsonl`: Frame-by-frame detection records, including rally ID, players, hands, court coordinates, speed, tennis ball coordinates, and post-processed bounce events.
 - `bounce_events.json`: Bounce point list produced by full-trajectory post-processing, including frame index, image coordinates, confidence, and diagnostics.
 - `cleaned_ball_trajectory.json`: Ball trajectory after filtering and short-gap interpolation; the final video uses this trajectory for drawing.
-- `shot_metrics.json`: Generated when `--shot-metrics true`; per-shot metrics (`hit_frame`/`bounce_frame`/`hitter`/`speed_kmh`/`spin_coeff`/`spin_label`/`spin_confidence`/`line_call`/`fit_ok`/`rms_px`). Shots where the fit failed (`fit_ok=false`) stay in the list with `speed_kmh`/`spin_coeff` set to `null` rather than being silently dropped.
+- `shot_metrics.json`: Generated when `--shot-metrics true`; per-shot metrics (`hit_frame`/`bounce_frame`/`hitter`/`speed_kmh`/`spin_coeff`/`spin_label`/`spin_confidence`/`line_call`/`fit_ok`/`rms_px`). Shots where the fit failed (`fit_ok=false`) stay in the list with `speed_kmh`/`spin_coeff` set to `null` rather than being silently dropped; with `--match-scoring true`, each shot additionally carries a `shot_type` field (serve/overhead/volley/forehand/backhand/unknown).
+- `match_score.json`: Generated when `--match-scoring true` — full point history (`history`), per-point score snapshots (`score_timeline`), per-point details (`points`: winner/reason/frame range/first-or-second serve), and the final score (`final`); rewritten in place by `tools/edit_point.py` after an edit.
+- `match_stats.json`: Generated when `--match-scoring true` — per-category shot counts and point win rates, serve statistics (first-serve-in %, double faults, avg/max speed), rally-length histogram, and bounce heatmaps.
+- `highlights.mp4`: Generated when `--highlights true` — highlight reel (long rallies + winner points) with a scoreboard overlay.
 - `detect_<video_name>.mp4`: Output video with skeletons, trajectories, statistics, mini-map, and rally ID overlays.
 - `court_annotations.txt`: Cached court annotation coordinates.
 - `auto_court_preview.png`: Automatic court detection preview image, generated when automatic candidates are available.

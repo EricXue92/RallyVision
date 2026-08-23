@@ -15,6 +15,7 @@ datasets/
 tools/*
 !tools/kp_smoke.py
 !tools/validate_speed.py
+!tools/edit_point.py
 !tools/demo_manifest.json
 outputs/
 datasets/

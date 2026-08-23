@@ -135,5 +135,7 @@ def test_write_shot_metrics_file_exists_and_schema_complete(tmp_path):
     assert set(payload[0].keys()) == SCHEMA_KEYS
 
 
-def test_schema_version_is_1_1():
-    assert SCHEMA_VERSION == "1.1"
+def test_schema_version_is_1_2():
+    # Task 7：schema 1.1 -> 1.2（shot_metrics 条目新增 "shot_type" 字段 + 新增
+    # match_score.json/match_stats.json 产物），见 tennis_analysis/data/writer.py。
+    assert SCHEMA_VERSION == "1.2"

@@ -6,6 +6,12 @@ import tkinter as tk
 import time
 import argparse
 
+# Task 7：比赛层（shot_type/rally/point_outcome/scoring/stats/highlights）纯 stdlib
+# + numpy 编排，不依赖 cv2/torch，直接顶层 import 即可（不必走下面 load_runtime_dependencies
+# 的懒加载——那套是为了让 --help 在没装重依赖时也能跑，这几个模块不属于重依赖）。
+from .analysis.match_layer import run_match_layer
+from .export.highlights import export_highlights, select_highlight_rallies
+
 
 def load_runtime_dependencies():
     """Load heavy runtime dependencies after argparse has handled --help."""
@@ -123,7 +129,10 @@ class TennisAnalysisSystem:
                  ball_detector='yolo', tracknet_model_path='weights/tracknet_ball.pt',
                  wasb_model_path='weights/wasb_tennis.pth',
                  court_calibration='keypoints', keypoint_model_path='weights/court_keypoints.pt',
-                 shot_metrics=True, line_call='doubles'):
+                 shot_metrics=True, line_call='doubles',
+                 match_scoring=False, first_server='lower',
+                 upper_hand='right', lower_hand='right',
+                 best_of=3, no_ad=False, highlights=False):
         self.video_path = video_path
         self.show_display = show_display
         self.language = language
@@ -150,6 +159,16 @@ class TennisAnalysisSystem:
         self.enable_shot_metrics = bool(shot_metrics)
         self.line_call_mode = None if line_call in (None, 'off') else line_call  # None = 跳过 call_bounce
         self.camera_dict = None
+
+        # Task 7：比赛层（shot_type/rally/point_outcome/scoring/stats/highlights）主流程接线
+        self.enable_match_scoring = bool(match_scoring)
+        self.first_server = first_server            # 'upper' | 'lower'
+        self.upper_hand = upper_hand                # 'right' | 'left'
+        self.lower_hand = lower_hand                # 'right' | 'left'
+        self.best_of = int(best_of)
+        self.sets_to_win = 3 if self.best_of == 5 else 2
+        self.no_ad = bool(no_ad)
+        self.enable_highlights = bool(highlights)
 
 
         self.show_skeletons = show_skeletons
@@ -225,6 +244,9 @@ class TennisAnalysisSystem:
         self.bounce_events_path = os.path.join(self.save_dir, "bounce_events.json")
         self.cleaned_ball_trajectory_path = os.path.join(self.save_dir, "cleaned_ball_trajectory.json")
         self.shot_metrics_path = os.path.join(self.save_dir, "shot_metrics.json")
+        self.match_score_path = os.path.join(self.save_dir, "match_score.json")
+        self.match_stats_path = os.path.join(self.save_dir, "match_stats.json")
+        self.highlights_path = os.path.join(self.save_dir, "highlights.mp4")
         self.output_video_path = os.path.join(self.save_dir, f"detect_{self.video_name}.mp4")
         self.temp_output_video_path = None
         self.detection_writer = None
@@ -829,6 +851,10 @@ class TennisAnalysisSystem:
         if self.show_bounce_detection and self.bounce_detector is not None:
             self._finalize_bounce_detection()
 
+        # Task 7：阶段 2 shot_metrics 写盘之后追加比赛层（behind --match-scoring）。
+        if self.enable_match_scoring:
+            self._run_match_layer()
+
         if self.show_display:
             cv2.destroyAllWindows()
 
@@ -876,6 +902,101 @@ class TennisAnalysisSystem:
         )
         if os.path.exists(annotated_path):
             os.replace(annotated_path, self.temp_output_video_path)
+
+    # ------------------------------------------------------------------
+    # Task 7: 比赛层（shot_type/rally/point_outcome/scoring/stats/highlights）主流程接线
+    # ------------------------------------------------------------------
+
+    def _run_match_layer(self):
+        """比赛层全链路，整体包在一个 try/except 里：任何一步异常都只打印双语警告
+        并跳过比赛层，绝不影响已经写盘的阶段 2 输出（shot_metrics.json 等）。"""
+        try:
+            if not self.enable_shot_metrics or not os.path.exists(self.shot_metrics_path):
+                print(
+                    "提示：--match-scoring 需要 --shot-metrics true 且已生成 shot_metrics.json，"
+                    "已跳过比赛层分析 / "
+                    "Notice: --match-scoring requires --shot-metrics true and an existing "
+                    "shot_metrics.json, skipping match layer analysis"
+                )
+                return
+            if not os.path.exists(self.detections_path):
+                print(
+                    "提示：缺少 detections.jsonl，已跳过比赛层分析 / "
+                    "Notice: detections.jsonl missing, skipping match layer analysis"
+                )
+                return
+
+            with open(self.shot_metrics_path, "r", encoding="utf-8") as file:
+                shot_metrics_entries = json.load(file)
+
+            detections_by_frame = {
+                int(record["frame"]): record
+                for record in self._load_detection_records()
+                if "frame" in record
+            }
+
+            result = run_match_layer(
+                shot_metrics_entries, detections_by_frame, self.fps,
+                first_server=self.first_server,
+                upper_hand=self.upper_hand, lower_hand=self.lower_hand,
+                sets_to_win=self.sets_to_win, no_ad=self.no_ad,
+                total_frames=self.total_frames,
+            )
+
+            # shot_metrics.json 是阶段 2 已经写盘的真产物，这里只是给每条追加
+            # "shot_type" 后整体重写；用 tmp + os.replace（与 _inject_line_call
+            # 同一套原子替换写法）而不是 write_json 的直接 open("w") 截断写，
+            # 避免序列化中途失败时把阶段 2 的好文件截断成半截坏文件。
+            self._atomic_write_json(self.shot_metrics_path, result["shot_metrics"])
+            self._atomic_write_json(self.match_score_path, result["match_score"])
+            self._atomic_write_json(self.match_stats_path, result["match_stats"])
+            print(
+                f"比赛层分析完成：{len(result['points'])} 分，"
+                f"结果={self.match_score_path} / {self.match_stats_path} / "
+                f"Match layer analysis complete: {len(result['points'])} points, "
+                f"output={self.match_score_path} / {self.match_stats_path}"
+            )
+
+            if self.enable_highlights:
+                self._export_highlights(result)
+        except Exception as exc:  # noqa: BLE001 - 比赛层失败不能影响阶段 2 产物
+            print(
+                "警告：比赛层分析失败，已跳过（阶段 2 输出不受影响）/ "
+                f"Warning: match layer analysis failed, skipping (phase-2 outputs unaffected): {exc}"
+            )
+
+    @staticmethod
+    def _atomic_write_json(path, payload):
+        """先写到 `{path}.tmp` 再 `os.replace`（与 `_inject_line_call` 同一套原子
+        替换写法），避免 `write_json` 的直接 open("w") 截断写在序列化中途失败时
+        把目标路径已有的旧文件（例如阶段 2 的 shot_metrics.json）截断成半截坏文件。"""
+        tmp_path = f"{path}.tmp"
+        write_json(tmp_path, payload)
+        os.replace(tmp_path, path)
+
+    def _export_highlights(self, match_layer_result):
+        """从 match layer 结果里挑集锦回合并导出；export_highlights 本身已对
+        ffmpeg 缺失/drawtext 缺失做了降级，这里额外兜底一层，防止选段/映射逻辑
+        本身出错波及比赛层已写盘的 JSON 产物。"""
+        try:
+            rallies = match_layer_result["rallies"]
+            points = match_layer_result["points"]
+            rally_score_lines = match_layer_result["rally_score_lines"]
+
+            selected_rallies = select_highlight_rallies(rallies, points)
+            index_by_id = {id(rally): index for index, rally in enumerate(rallies)}
+            selected_score_lines = [
+                rally_score_lines[index_by_id[id(rally)]] for rally in selected_rallies
+            ]
+            export_highlights(
+                self.video_path, selected_rallies, selected_score_lines,
+                self.highlights_path, self.fps,
+            )
+        except Exception as exc:  # noqa: BLE001 - 集锦导出失败不能影响比赛层其余产物
+            print(
+                "警告：集锦导出失败，已跳过 / "
+                f"Warning: highlight export failed, skipping: {exc}"
+            )
 
     # ------------------------------------------------------------------
     # Task 10: shot metrics / spin / line calling 主流程接线
