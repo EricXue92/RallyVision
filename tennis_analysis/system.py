@@ -943,9 +943,13 @@ class TennisAnalysisSystem:
                 total_frames=self.total_frames,
             )
 
-            write_json(self.shot_metrics_path, result["shot_metrics"])
-            write_json(self.match_score_path, result["match_score"])
-            write_json(self.match_stats_path, result["match_stats"])
+            # shot_metrics.json 是阶段 2 已经写盘的真产物，这里只是给每条追加
+            # "shot_type" 后整体重写；用 tmp + os.replace（与 _inject_line_call
+            # 同一套原子替换写法）而不是 write_json 的直接 open("w") 截断写，
+            # 避免序列化中途失败时把阶段 2 的好文件截断成半截坏文件。
+            self._atomic_write_json(self.shot_metrics_path, result["shot_metrics"])
+            self._atomic_write_json(self.match_score_path, result["match_score"])
+            self._atomic_write_json(self.match_stats_path, result["match_stats"])
             print(
                 f"比赛层分析完成：{len(result['points'])} 分，"
                 f"结果={self.match_score_path} / {self.match_stats_path} / "
@@ -960,6 +964,15 @@ class TennisAnalysisSystem:
                 "警告：比赛层分析失败，已跳过（阶段 2 输出不受影响）/ "
                 f"Warning: match layer analysis failed, skipping (phase-2 outputs unaffected): {exc}"
             )
+
+    @staticmethod
+    def _atomic_write_json(path, payload):
+        """先写到 `{path}.tmp` 再 `os.replace`（与 `_inject_line_call` 同一套原子
+        替换写法），避免 `write_json` 的直接 open("w") 截断写在序列化中途失败时
+        把目标路径已有的旧文件（例如阶段 2 的 shot_metrics.json）截断成半截坏文件。"""
+        tmp_path = f"{path}.tmp"
+        write_json(tmp_path, payload)
+        os.replace(tmp_path, path)
 
     def _export_highlights(self, match_layer_result):
         """从 match layer 结果里挑集锦回合并导出；export_highlights 本身已对

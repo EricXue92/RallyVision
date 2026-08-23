@@ -7,6 +7,7 @@
 from .point_outcome import infer_points
 from .rally import BALL_LOST_FRAMES, extract_rallies
 from .scoring import MatchState
+from .shot_type import NET_Y as HALF_COURT_LENGTH_M
 from .shot_type import classify_shot
 from .stats_report import build_stats
 
@@ -15,7 +16,8 @@ from .stats_report import build_stats
 # stats_report）全程用字符串 side。
 _SIDE_TO_INT = {"upper": 0, "lower": 1}
 
-HALF_COURT_LENGTH_M = 11.885  # 网线球场坐标 y，同 shot_type.py NET_Y / stats_report.py
+# 网线球场坐标 y（11.885）——直接从 shot_type.py 导入，不再本地重复硬编码
+# （同一常量的第三处口径，见 stats_report.py HALF_COURT_LENGTH_M）。
 
 
 def _handedness_for(hitter, upper_hand, lower_hand):
@@ -144,9 +146,6 @@ def run_match_layer(shot_metrics_entries, detections_by_frame, fps, *,
     rally_score_lines = [""] * len(rallies)
     for point in points:
         pre_point_score = match_state.score_line()
-        for rally_index in point["rally_indices"]:
-            if 0 <= rally_index < len(rally_score_lines):
-                rally_score_lines[rally_index] = pre_point_score
         try:
             match_state.apply_point(_SIDE_TO_INT[point["winner"]], point["reason"], rally_frames=point["rally_indices"])
         except ValueError:
@@ -155,7 +154,19 @@ def run_match_layer(shot_metrics_entries, detections_by_frame, fps, *,
                 "Notice: match already finished, ignoring the remaining points"
             )
             break
+        # 只有真正喂进 MatchState 的分才落进 rally_score_lines/score_timeline——
+        # 提前结束后的多余分（infer_points 仍会算出来，因为它对回合数据判定
+        # 输赢，不知道比赛已经打完）必须被整体丢弃，否则 points/score_timeline
+        # 长度、build_stats 的 points_won 汇总都会与"真实终局比分"对不上。
+        for rally_index in point["rally_indices"]:
+            if 0 <= rally_index < len(rally_score_lines):
+                rally_score_lines[rally_index] = pre_point_score
         score_timeline.append(match_state.score_line())
+
+    # 与上面同一条不变量：points 从这里开始就是"真正被计入终局比分的分"，
+    # 下面的 match_score["points"] 和 build_stats 都必须用这个截断后的列表，
+    # 不能用原始 infer_points 输出（那份可能比赛已结束后还有多余的分）。
+    points = points[:len(score_timeline)]
 
     match_score = match_state.to_dict()
     match_score["score_timeline"] = score_timeline
