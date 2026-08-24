@@ -19,6 +19,7 @@ tools/*
 !tools/demo_manifest.json
 !tools/report_builder.py
 !tools/worker.py
+!tools/render_heatmap.py
 outputs/
 datasets/
 *.log

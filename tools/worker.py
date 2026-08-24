@@ -123,6 +123,26 @@ def _client():
                         headers={"X-Worker-Token": token})
 
 
+def render_heatmap(output_dir):
+    """跑原版 matplotlib 熱力圖(tools/render_heatmap.py 子進程,Agg headless)。
+    可選增值物:任何失敗都只記日誌返回 None,絕不阻斷任務完成。"""
+    try:
+        proc = subprocess.run(
+            ["uv", "run", "python", "tools/render_heatmap.py", str(output_dir)],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            timeout=300, capture_output=True, text=True,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            path = proc.stdout.strip().splitlines()[-1]
+            if os.path.isfile(path):
+                return path
+        print("熱力圖渲染失敗 rc=%s %s / heatmap render failed"
+              % (proc.returncode, (proc.stderr or "")[-300:]), file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 — 渲染屬可選路徑,吞掉但留日誌
+        print("熱力圖渲染異常 %s / heatmap render error" % exc, file=sys.stderr)
+    return None
+
+
 def _download(client, url, dest):
     with client.stream("GET", url) as r:
         r.raise_for_status()
@@ -167,11 +187,13 @@ def process_one(client):
             raise RuntimeError("pipeline exit %d" % proc.returncode)
         report = build_report(out_dir)
         hl = has_highlights(out_dir)
+        heatmap_path = render_heatmap(out_dir)
 
         resp = with_retry(
             lambda: client.post(
                 "/v1/rallyvision/worker/jobs/%s/result" % job_id,
-                json={"report": report, "has_highlights": hl},
+                json={"report": report, "has_highlights": hl,
+                      "has_heatmap": heatmap_path is not None},
                 headers=claim_headers,
             ).raise_for_status()
         ).json()
@@ -197,6 +219,23 @@ def process_one(client):
                     headers={"Content-Type": "video/mp4"}, timeout=600.0,
                 ).raise_for_status()
             )
+
+        if heatmap_path:
+            # 熱力圖是可選增值物:上傳失敗只記日誌不阻斷 complete(iOS 端拿不到 URL 會回退本地渲染)
+            put_url = resp.get("heatmap_put_url")
+            if put_url:
+                try:
+                    with open(heatmap_path, "rb") as f:
+                        heatmap_bytes = f.read()
+                    with_retry(
+                        lambda: httpx.put(
+                            put_url, content=heatmap_bytes,
+                            headers={"Content-Type": "image/png"}, timeout=120.0,
+                        ).raise_for_status()
+                    )
+                except Exception as heat_exc:  # noqa: BLE001
+                    print("熱力圖上傳失敗(不阻斷) %s / heatmap upload failed (non-fatal)" % heat_exc,
+                          file=sys.stderr)
 
         with_retry(
             lambda: client.post(
