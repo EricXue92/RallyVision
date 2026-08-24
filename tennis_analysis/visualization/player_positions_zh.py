@@ -583,13 +583,13 @@ class PlayerPositionVisualizer:
         if rally_id is not None:
             # 单个回合的统计信息
             stats = self.movement_stats[rally_id]
-            info_text = f"回合 {rally_id} 统计:\n"
+            info_text = "统计:\n"
             info_text += "---------------\n"
             
             # 上场球员统计
             if 'upper' in stats:
                 upper_stats = stats['upper']
-                info_text += f"上场球员:\n"
+                info_text += f"红色球员:\n"
                 info_text += f"  平均速度: {upper_stats['avg_speed']:.2f} 米/秒\n"
                 info_text += f"  最大速度: {upper_stats['max_speed']:.2f} 米/秒\n"
                 info_text += f"  移动距离: {upper_stats['total_distance']:.2f} 米\n"
@@ -597,13 +597,13 @@ class PlayerPositionVisualizer:
             # 下场球员统计
             if 'lower' in stats:
                 lower_stats = stats['lower']
-                info_text += f"\n下场球员:\n"
+                info_text += f"\n蓝色球员:\n"
                 info_text += f"  平均速度: {lower_stats['avg_speed']:.2f} 米/秒\n"
                 info_text += f"  最大速度: {lower_stats['max_speed']:.2f} 米/秒\n"
                 info_text += f"  移动距离: {lower_stats['total_distance']:.2f} 米\n"
         else:
             # 整场比赛的统计信息
-            info_text = f"比赛统计\n"
+            info_text = "统计\n"
             info_text += "=================\n"
             
             # 计算所有回合的总统计数据
@@ -630,7 +630,7 @@ class PlayerPositionVisualizer:
                         lower_avg_speeds.append(rally_stats['lower']['avg_speed'])
             
             # 添加上场球员信息
-            info_text += f"上场球员:\n"
+            info_text += f"红色球员:\n"
             if upper_distances:
                 total_distance = sum(upper_distances)
                 info_text += f"  总移动距离: {total_distance:.2f} 米\n"
@@ -642,7 +642,7 @@ class PlayerPositionVisualizer:
                 info_text += f"  最大速度: {max(upper_speeds):.2f} 米/秒\n"
             
             # 添加下场球员信息
-            info_text += f"\n下场球员:\n"
+            info_text += f"\n蓝色球员:\n"
             if lower_distances:
                 total_distance = sum(lower_distances)
                 info_text += f"  总移动距离: {total_distance:.2f} 米\n"
