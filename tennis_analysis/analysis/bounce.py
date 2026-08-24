@@ -107,7 +107,8 @@ class BounceDetector:
         raw_events = []
         classifier = self._load_classifier()
         if classifier is not None:
-            return self._detect_with_classifier(classifier, points, coords, velocity)
+            events = self._detect_with_classifier(classifier, points, coords, velocity)
+            return self._refine_events(points, events)
 
         court_coords = np.array(
             [
@@ -151,7 +152,8 @@ class BounceDetector:
                 }
             )
 
-        return self._dedupe_events(raw_events)
+        # 去重在 _refine_events 链内做(吸附+击球点丢弃之后),这里传原始候选
+        return self._refine_events(points, raw_events)
 
     def _detect_with_classifier(self, classifier, points, coords, velocity):
         feature_rows = []
@@ -209,7 +211,8 @@ class BounceDetector:
                     },
                 }
             )
-        return self._dedupe_events(raw_events)
+        # 去重在 _refine_events 链内做(吸附+击球点丢弃之后),这里返回原始候选
+        return raw_events
 
     def annotate_video(
         self,
@@ -500,7 +503,17 @@ class BounceDetector:
         y_reversal = y_slope_in > 0.05 and y_slope_out < -0.05
         local_y_peak = window[center, 1] >= np.max(window[max(0, center - 5):min(len(window), center + 6), 1]) - 4.0
         local_y_valley = window[center, 1] <= np.min(window[max(0, center - 5):min(len(window), center + 6), 1]) + 4.0
-        y_extreme = local_y_peak or local_y_valley
+
+        # 触地在图像里必是局部 y 最大(屏幕最低点)。局部 y 谷是过网点/弧顶,
+        # 物理上不可能触地——落点图事故(job 6e98cc64 f16)就是过网点走谷通道混入。
+        if not (y_reversal or local_y_peak):
+            return 0.0, {
+                "reject_reason": "no_ground_contact_signature",
+                "turn_degrees": round(float(turn_degrees), 3),
+                "deviation_px": round(float(deviation), 3),
+                "local_y_valley": bool(local_y_valley),
+                "window_size": int(self.window_size),
+            }
 
         court_turn = 0.0
         court_deviation = 0.0
@@ -512,19 +525,27 @@ class BounceDetector:
             court_turn = self._angle_between(court_center - court_before, court_after - court_center)
             court_deviation = self._point_line_distance(court_center, court_before, court_after)
 
+            # 球拍击球否决:真弹跳后球继续朝同一深度方向走,只有击球才会让
+            # court y 速度反向(与 segments 判 hit 同款信号)。两侧深度分量都
+            # 超过 1 m/s 噪声地板才算有效反向——高吊近垂直下落时 vy≈0 不误伤。
+            cy = court_smooth[:, 1]
+            vy_in_ms = float(np.mean(np.diff(cy[:center + 1])[-5:])) * self.fps
+            vy_out_ms = float(np.mean(np.diff(cy[center:])[:5])) * self.fps
+            if vy_in_ms * vy_out_ms < 0 and min(abs(vy_in_ms), abs(vy_out_ms)) > 1.0:
+                return 0.0, {
+                    "reject_reason": "court_depth_reversal",
+                    "vy_in_ms": round(vy_in_ms, 3),
+                    "vy_out_ms": round(vy_out_ms, 3),
+                    "turn_degrees": round(float(turn_degrees), 3),
+                    "window_size": int(self.window_size),
+                }
+
         angle_score = min(1.0, turn_degrees / 95.0)
         deviation_score = min(1.0, deviation / 18.0)
         speed_score = min(1.0, max(0.0, speed_ratio - 1.0) / 2.0)
         reversal_score = 1.0 if y_reversal else 0.0
-        extreme_score = 1.0 if y_extreme else 0.0
+        extreme_score = 1.0 if local_y_peak else 0.0
         court_score = max(min(1.0, court_turn / 75.0), min(1.0, court_deviation / 0.55))
-        if not (y_reversal or y_extreme):
-            return 0.0, {
-                "reject_reason": "no_local_y_extreme",
-                "turn_degrees": round(float(turn_degrees), 3),
-                "deviation_px": round(float(deviation), 3),
-                "window_size": int(self.window_size),
-            }
         score = (
             0.28 * angle_score
             + 0.24 * deviation_score
@@ -615,6 +636,83 @@ class BounceDetector:
             "y": pd.Series([float(window[index, 1]) for index in range(self.window_size)]),
             "V": pd.Series([float(velocity[index]) for index in range(self.window_size)]),
         }
+
+    # 事件帧吸附半径:检测窗口滞后可能让中心帧偏离真实触地帧几帧,而空中球的
+    # 单帧 homography 投影在深度方向误差可达数米(落点图事故根因之二)。
+    SNAP_RADIUS_FRAMES = 4
+
+    def _refine_events(self, points, events):
+        """落点精化链(输入为未去重的原始候选,次序有讲究):
+        1. 吸附:事件帧吸附到邻域内图像 y 最大(屏幕最低点=触地)的有效帧;
+        2. 丢弃:最终帧处 court 深度方向速度反转 = 球拍击球,整个事件丢弃——
+           评分层的否决只看以候选中心为准的窗口,中心偏前几帧的候选窗口里
+           看不到反转,会漏过否决再被吸附拖到击球帧上(job 6e98cc64 f28/f142/f217);
+        3. 去重:必须在丢弃**之后**——先去重会让高分击球点吃掉相邻真弹跳、
+           自己再被丢,两头落空(job 6e98cc64 serve-1 落点);
+        4. 精化:segments.refine_bounce 双抛物线求亚帧触地时刻、按该时刻插值
+           court 坐标,替换单帧投影值。原始坐标保留在 diagnostics.court_raw。"""
+        if not events:
+            return events
+        from .segments import refine_bounce
+
+        dict_points = [
+            {
+                "frame": int(point.frame),
+                "time_sec": float(point.time_sec),
+                "image": list(point.image) if point.image is not None else None,
+                "court": list(point.court) if point.court is not None else None,
+            }
+            for point in points
+        ]
+        by_frame = {p["frame"]: p for p in dict_points if p["image"] is not None}
+
+        kept = []
+        for event in events:
+            frame = int(event["frame"])
+            candidates = [
+                f for f in range(frame - self.SNAP_RADIUS_FRAMES, frame + self.SNAP_RADIUS_FRAMES + 1)
+                if f in by_frame
+            ]
+            if candidates:
+                snapped = max(candidates, key=lambda f: by_frame[f]["image"][1])
+                if snapped != frame:
+                    point = by_frame[snapped]
+                    event["frame"] = snapped
+                    event["time_sec"] = round(point["time_sec"], 6)
+                    event["image"] = [round(point["image"][0], 2), round(point["image"][1], 2)]
+                    event["court"] = point["court"]
+                    frame = snapped
+            if self._depth_reversal_at(dict_points, frame):
+                continue
+            kept.append(event)
+
+        refined_events = []
+        for event in self._dedupe_events(kept):
+            try:
+                _, refined_court = refine_bounce(dict_points, int(event["frame"]))
+            except (ValueError, TypeError):
+                # 邻域内没有任何有效 court 坐标可插值时精化不可用,保留原值
+                refined_court = None
+            if refined_court is not None:
+                diagnostics = event.setdefault("diagnostics", {})
+                diagnostics["court_raw"] = event.get("court")
+                event["court"] = [round(float(refined_court[0]), 2), round(float(refined_court[1]), 2)]
+            refined_events.append(event)
+        return refined_events
+
+    def _depth_reversal_at(self, dict_points, frame, window=6):
+        """最终帧两侧各 window 帧的 court y 端点斜率:真弹跳后球继续朝同一深度
+        方向走,只有球拍击球才会反向。两侧都超过 1 m/s 噪声地板才算有效反向。"""
+        court_by_frame = {
+            p["frame"]: p["court"] for p in dict_points if p["court"] is not None
+        }
+        pre = [(f, court_by_frame[f][1]) for f in range(frame - window, frame + 1) if f in court_by_frame]
+        post = [(f, court_by_frame[f][1]) for f in range(frame, frame + window + 1) if f in court_by_frame]
+        if len(pre) < 3 or len(post) < 3:
+            return False
+        vy_in_ms = (pre[-1][1] - pre[0][1]) / max(1, pre[-1][0] - pre[0][0]) * self.fps
+        vy_out_ms = (post[-1][1] - post[0][1]) / max(1, post[-1][0] - post[0][0]) * self.fps
+        return vy_in_ms * vy_out_ms < 0 and min(abs(vy_in_ms), abs(vy_out_ms)) > 1.0
 
     def _dedupe_events(self, events):
         selected = []
