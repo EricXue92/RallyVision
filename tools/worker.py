@@ -143,6 +143,51 @@ def render_heatmap(output_dir):
     return None
 
 
+def transcode_annotated(output_dir):
+    """把 pipeline 的帶標註視頻(detect_input.mp4)轉成 720p/CRF28 上傳檔,控制 COS 存儲與
+    手機下載體積。轉碼失敗降級返回原檔路徑;連原檔都沒有返回 None。可選增值物,絕不阻斷。
+
+    Transcode the annotated video (detect_input.mp4) to 720p/CRF28 for upload, capping
+    storage and download size. Falls back to the original file if ffmpeg fails; returns
+    None when there is no annotated video at all. Optional artifact — never blocks the job.
+    """
+    src = os.path.join(output_dir, "detect_input.mp4")
+    if not os.path.isfile(src):
+        return None
+    dst = os.path.join(output_dir, "annotated_720p.mp4")
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-i", src, "-vf", "scale=-2:720",
+             "-c:v", "libx264", "-crf", "28", "-preset", "medium",
+             "-c:a", "aac", "-movflags", "+faststart", dst],
+            timeout=3600, capture_output=True,
+        )
+        if proc.returncode == 0 and os.path.isfile(dst):
+            return dst
+        print("標註影片轉碼失敗 rc=%s,降級傳原檔 / annotated transcode failed, "
+              "falling back to source" % proc.returncode, file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 — 轉碼屬可選路徑,降級但留日誌
+        print("標註影片轉碼異常 %s,降級傳原檔 / annotated transcode error" % exc,
+              file=sys.stderr)
+    return src
+
+
+def put_file_with_retry(put_url, path, content_type, *, timeout,
+                        put_fn=httpx.put, sleep_fn=time.sleep):
+    """流式 PUT 大文件(GB 級不整讀進內存)。每次 attempt 重新 open——重試不能復用
+    已被上次失敗消耗掉的文件句柄。
+
+    Streaming PUT for large files (never loads GBs into memory). The file is reopened
+    on every attempt: a retry must not reuse a handle already consumed by the failed try.
+    """
+    def attempt():
+        with open(path, "rb") as f:
+            return put_fn(put_url, content=f,
+                          headers={"Content-Type": content_type},
+                          timeout=timeout).raise_for_status()
+    with_retry(attempt, sleep_fn=sleep_fn)
+
+
 def _download(client, url, dest):
     with client.stream("GET", url) as r:
         r.raise_for_status()
@@ -188,12 +233,14 @@ def process_one(client):
         report = build_report(out_dir)
         hl = has_highlights(out_dir)
         heatmap_path = render_heatmap(out_dir)
+        annotated_path = transcode_annotated(out_dir)
 
         resp = with_retry(
             lambda: client.post(
                 "/v1/rallyvision/worker/jobs/%s/result" % job_id,
                 json={"report": report, "has_highlights": hl,
-                      "has_heatmap": heatmap_path is not None},
+                      "has_heatmap": heatmap_path is not None,
+                      "has_annotated_video": annotated_path is not None},
                 headers=claim_headers,
             ).raise_for_status()
         ).json()
@@ -236,6 +283,18 @@ def process_one(client):
                 except Exception as heat_exc:  # noqa: BLE001
                     print("熱力圖上傳失敗(不阻斷) %s / heatmap upload failed (non-fatal)" % heat_exc,
                           file=sys.stderr)
+
+        if annotated_path:
+            # 標註影片同熱力圖:可選增值物,上傳失敗只記日誌不阻斷 complete
+            # (iOS 端拿不到 URL 就不渲染該區塊)。
+            put_url = resp.get("annotated_put_url")
+            if put_url:
+                try:
+                    put_file_with_retry(put_url, annotated_path, "video/mp4",
+                                        timeout=1800.0)
+                except Exception as ann_exc:  # noqa: BLE001
+                    print("標註影片上傳失敗(不阻斷) %s / annotated upload failed "
+                          "(non-fatal)" % ann_exc, file=sys.stderr)
 
         with_retry(
             lambda: client.post(
