@@ -74,6 +74,34 @@ def attach_shot_types(shot_metrics_entries, detections_by_frame, fps, upper_hand
     return result
 
 
+def demote_mid_rally_serves(rallies, detections_by_frame, upper_hand="right", lower_hand="right"):
+    """回合切分后的 serve 收口（2026-08-24）：attach_shot_types 的 gap 启发式在低帧率
+    素材上会把回合中段的底线击球误标 serve（正常对拉拍间飞行时间普遍超过按 fps
+    缩放的 BALL_LOST_FRAMES 阈值，is_first_shot 几乎恒真）。回合结构确定之后，
+    serve 只能是各回合首拍——其余 serve 一律用 is_first_shot=False 重新分类。
+
+    就地改 shot dict：Rally.shots 与 attach_shot_types 返回列表引用同一批 dict，
+    这里改完，下游 infer_points / build_stats / 写盘 shot_metrics.json 都自动生效。
+    注：serve 标注的拍在 extract_rallies 里必然开启回合（state 为空时 serve 必
+    starts_rally），不存在「回合之外的 serve」，遍历 rallies 即覆盖全部。
+    """
+    first_shot_ids = {id(rally.shots[0]) for rally in rallies}
+    for rally in rallies:
+        for shot in rally.shots:
+            if shot.get("shot_type") != "serve" or id(shot) in first_shot_ids:
+                continue
+            hitter = shot.get("hitter")
+            context = _hit_context(detections_by_frame, shot["hit_frame"], hitter)
+            shot_type = "unknown"
+            if context is not None and context["ball_image"] is not None and context["player_court"] is not None:
+                shot_type = classify_shot(
+                    context["ball_image"], context["player_court"], context["player_image"],
+                    context["hands"], hitter, _handedness_for(hitter, upper_hand, lower_hand),
+                    False,
+                )
+            shot["shot_type"] = shot_type
+
+
 def build_bounces(detections_by_frame):
     """从 detections.jsonl 的逐帧 "bounce" 字段构建 rally.extract_rallies 需要的
     bounces 列表（frame/court/line_call/side）。side 按落点 court y 是否小于半场长
@@ -139,6 +167,8 @@ def run_match_layer(shot_metrics_entries, detections_by_frame, fps, *,
     visible = build_visible(detections_by_frame, total_frames=total_frames)
 
     rallies = extract_rallies(shots_with_type, bounces, visible, fps)
+    # 必须在 infer_points/build_stats 之前：fault/双误与发球速度统计都消费 shot_type
+    demote_mid_rally_serves(rallies, detections_by_frame, upper_hand=upper_hand, lower_hand=lower_hand)
     points = infer_points(rallies, first_server)
 
     match_state = MatchState(sets_to_win=sets_to_win, no_ad=no_ad, server=_SIDE_TO_INT[first_server])
