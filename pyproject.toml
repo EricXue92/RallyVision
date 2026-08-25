@@ -25,6 +25,7 @@ dependencies = [
     "openpyxl>=3.0.0",
     "lap>=0.5.12",
     "httpx>=0.28.1",
+    "catboost>=1.2.10",
 ]
 
 [tool.uv]

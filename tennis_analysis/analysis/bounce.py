@@ -55,7 +55,7 @@ class BounceDetector:
         fps=30,
         window_size=20,
         center_offset=10,
-        min_event_gap_sec=0.45,
+        min_event_gap_sec=0.5,
         min_score=0.34,
         max_interpolation_gap=12,
         classifier_path="",
@@ -75,6 +75,7 @@ class BounceDetector:
         self.max_speed_ratio = float(max_speed_ratio)
         self.classifier = None
         self.classifier_error = None
+        self._classifier_kind = None  # 'catboost' | 'sktime'
         self.events = []
         self.processed_points = []
 
@@ -106,6 +107,12 @@ class BounceDetector:
         velocity = self._velocity(coords)
         raw_events = []
         classifier = self._load_classifier()
+        if classifier is not None and self._classifier_kind == "catboost":
+            # CatBoost 路径(移植自 yastrebksv/TennisProject):模型在带标注真实
+            # 数据上训练,自带 bounce/hit 区分,不走规则链的吸附+否决(那套
+            # 窗口启发式在「落点后 0.2s 内被回击」的常见场景会误杀真落点)。
+            events = self._detect_with_catboost(classifier, points, coords)
+            return self._finalize_events(points, events)
         if classifier is not None:
             events = self._detect_with_classifier(classifier, points, coords, velocity)
             return self._refine_events(points, events)
@@ -154,6 +161,112 @@ class BounceDetector:
 
         # 去重在 _refine_events 链内做(吸附+击球点丢弃之后),这里传原始候选
         return self._refine_events(points, raw_events)
+
+    # CatBoost 回归输出过阈值即候选;阈值与参考实现(yastrebksv/TennisProject)一致
+    CATBOOST_THRESHOLD = 0.45
+
+    def _detect_with_catboost(self, model, points, coords):
+        """特征工程逐列复刻参考实现:±2 帧滞后的 x/y 差分与差分比,共 12 列。
+        行按帧序对齐,检测缺失帧特征为 NaN、整行丢弃(与参考的 notna 过滤等价)。"""
+        frame_series = pd.DataFrame(
+            {
+                "x": [float(c[0]) if np.isfinite(c[0]) else np.nan for c in coords],
+                "y": [float(c[1]) if np.isfinite(c[1]) else np.nan for c in coords],
+            }
+        )
+        num = 3
+        eps = 1e-15
+        for i in range(1, num):
+            for col in ("x", "y"):
+                frame_series[f"{col}_lag_{i}"] = frame_series[col].shift(i)
+                frame_series[f"{col}_lag_inv_{i}"] = frame_series[col].shift(-i)
+            frame_series[f"x_diff_{i}"] = (frame_series[f"x_lag_{i}"] - frame_series["x"]).abs()
+            frame_series[f"y_diff_{i}"] = frame_series[f"y_lag_{i}"] - frame_series["y"]
+            frame_series[f"x_diff_inv_{i}"] = (frame_series[f"x_lag_inv_{i}"] - frame_series["x"]).abs()
+            frame_series[f"y_diff_inv_{i}"] = frame_series[f"y_lag_inv_{i}"] - frame_series["y"]
+            frame_series[f"x_div_{i}"] = (frame_series[f"x_diff_{i}"] / (frame_series[f"x_diff_inv_{i}"] + eps)).abs()
+            frame_series[f"y_div_{i}"] = frame_series[f"y_diff_{i}"] / (frame_series[f"y_diff_inv_{i}"] + eps)
+
+        columns = (
+            [f"x_diff_{i}" for i in range(1, num)]
+            + [f"x_diff_inv_{i}" for i in range(1, num)]
+            + [f"x_div_{i}" for i in range(1, num)]
+            + [f"y_diff_{i}" for i in range(1, num)]
+            + [f"y_diff_inv_{i}" for i in range(1, num)]
+            + [f"y_div_{i}" for i in range(1, num)]
+        )
+        valid = frame_series[columns].notna().all(axis=1)
+        features = frame_series.loc[valid, columns]
+        if features.empty:
+            return []
+        predictions = model.predict(features)
+        row_indices = list(features.index)
+
+        raw_events = []
+        for row_number, prob in enumerate(predictions):
+            if prob <= self.CATBOOST_THRESHOLD:
+                continue
+            index = row_indices[row_number]
+            # 参考实现的连续帧合并:相邻帧都过阈值时只留概率更高的一帧
+            if raw_events and index - raw_events[-1][0] == 1:
+                if prob > raw_events[-1][1]:
+                    raw_events[-1] = (index, float(prob))
+                continue
+            raw_events.append((index, float(prob)))
+
+        events = []
+        for index, prob in raw_events:
+            point = points[index]
+            if point.image is None:
+                continue
+            if not self._valid_bounce_court_position(point.court):
+                continue
+            events.append(
+                {
+                    "frame": int(point.frame),
+                    "time_sec": round(float(point.time_sec), 6),
+                    "image": [round(float(point.image[0]), 2), round(float(point.image[1]), 2)],
+                    "court": point.court,
+                    "confidence": round(min(float(prob), 1.0), 3),
+                    "method": "catboost_lag2",
+                    "diagnostics": {
+                        "classifier_path": self.classifier_path,
+                        "raw_prediction": round(float(prob), 4),
+                        "threshold": self.CATBOOST_THRESHOLD,
+                    },
+                }
+            )
+        return events
+
+    def _finalize_events(self, points, events):
+        """CatBoost 路径的收尾:去重(0.5s 窗口留最高置信,真落点会吃掉紧邻的
+        击球残余候选)+ segments.refine_bounce 亚帧插值 court 坐标。
+        不做规则链的 y-max 吸附与深度反转否决。"""
+        if not events:
+            return events
+        from .segments import refine_bounce
+
+        dict_points = [
+            {
+                "frame": int(point.frame),
+                "time_sec": float(point.time_sec),
+                "image": list(point.image) if point.image is not None else None,
+                "court": list(point.court) if point.court is not None else None,
+            }
+            for point in points
+        ]
+        refined_events = []
+        for event in self._dedupe_events(events):
+            try:
+                _, refined_court = refine_bounce(dict_points, int(event["frame"]))
+            except (ValueError, TypeError):
+                refined_court = None
+            if refined_court is not None:
+                diagnostics = event.setdefault("diagnostics", {})
+                diagnostics["court_raw"] = event.get("court")
+                event["court"] = [round(float(refined_court[0]), 2), round(float(refined_court[1]), 2)]
+            refined_events.append(event)
+        return refined_events
 
     def _detect_with_classifier(self, classifier, points, coords, velocity):
         feature_rows = []
@@ -590,6 +703,20 @@ class BounceDetector:
         if not self.classifier_path or not os.path.exists(self.classifier_path):
             self.classifier_error = f"classifier not found: {self.classifier_path}"
             return None
+        if self.classifier_path.endswith(".cbm"):
+            try:
+                import catboost
+
+                model = catboost.CatBoostRegressor()
+                model.load_model(self.classifier_path)
+                self.classifier = model
+                self._classifier_kind = "catboost"
+                print(f"已加载 CatBoost 弹跳模型 / Loaded CatBoost bounce model: {self.classifier_path}")
+            except Exception as exc:
+                self.classifier_error = f"{type(exc).__name__}: {exc}"
+                print(f"CatBoost 弹跳模型加载失败，回退规则评分 / CatBoost bounce model load failed, falling back to rule-based scoring: {self.classifier_error}")
+                return None
+            return self.classifier
         try:
             self._install_pickle_compat()
             with warnings.catch_warnings():
@@ -597,6 +724,7 @@ class BounceDetector:
                 with open(self.classifier_path, "rb") as file:
                     self.classifier = pickle.load(file)
             self._repair_legacy_classifier(self.classifier)
+            self._classifier_kind = "sktime"
         except Exception as exc:
             self.classifier_error = f"{type(exc).__name__}: {exc}"
             print(f"寮硅烦鍒嗙被妯″瀷鍔犺浇澶辫触锛屽洖閫€瑙勫垯璇勫垎: {self.classifier_error}")

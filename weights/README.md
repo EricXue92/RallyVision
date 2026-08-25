@@ -165,3 +165,30 @@ precision/recall study (no ground-truth ball positions, just "did *some*
 candidate clear the confidence threshold"), so treat these as rough
 backend-selection signals, not accuracy claims. The default backend stays
 `yolo`; `tracknet`/`wasb` remain opt-in experiments via `--ball-detector`.
+
+## Bounce detection model (`weights/ctb_regr_bounce.cbm`)
+
+Used by `tennis_analysis/analysis/bounce.py::BounceDetector` as the default
+bounce (landing point) detector: a CatBoost regressor over ±2-frame lagged
+x/y image-trajectory features, ported from
+[yastrebksv/TennisProject](https://github.com/yastrebksv/TennisProject)
+(`bounce_detector.py`, threshold 0.45, consecutive-frame merge). That repo
+declares no license (no LICENSE file in the repo root) — usage/redistribution
+status is unverified, same caveat as the court keypoint detector above.
+
+The pretrained model is hosted on Google Drive (linked from that repo's
+README, "Bounce detection" section):
+
+```text
+https://drive.google.com/file/d/1Eo5HDnAQE8y_FbOftKZ8pjiojwuy2BmJ/view?usp=drive_link
+```
+
+Download with `gdown` and save it as `weights/ctb_regr_bounce.cbm`:
+
+```bash
+uv run --with gdown python -c "import gdown; gdown.download(id='1Eo5HDnAQE8y_FbOftKZ8pjiojwuy2BmJ', output='weights/ctb_regr_bounce.cbm', quiet=False)"
+```
+
+When the file is present it is picked up automatically (no CLI flag needed);
+when missing, `BounceDetector` falls back to the legacy rule-based scoring
+chain. An explicit `--bounce-classifier` path still overrides the default.

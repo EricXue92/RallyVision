@@ -22,6 +22,7 @@
 
 ## 📝 更新日志
 
+- **2026-08-25**：弹跳检测默认改用 CatBoost 模型（移植自 [yastrebksv/TennisProject](https://github.com/yastrebksv/TennisProject)，±2 帧滞后特征 + 0.45 阈值），落点召回大幅提升；权重放 `weights/ctb_regr_bounce.cbm` 自动启用，缺失时回退规则评分（下载方式见 `weights/README.md`）。
 - **2026-08-23**：阶段三比赛层上线——击球类型分类（规则法）、回合切分、每分判定与自动计分（`--match-scoring`）、比赛统计（`match_stats.json`）、集锦导出（`--highlights`），以及比分修正重算工具 `tools/edit_point.py`（改判任意一分后整场从头重放自动重算）。
 - **2026-08-22**：阶段二能力上线——固定机位相机标定（`--court-calibration`）、击球速度/旋转估计（`--shot-metrics`）、弹跳点 IN/OUT 判罚（`--line-call`）、新增 WASB-SBDT 球检测后端（`--ball-detector wasb`，与 yolo/tracknet 三选一），并提供真实数据球速验证工具 `tools/validate_speed.py`。
 - **2026-07-02**：增加球员位置追踪和自动球场外角点检测

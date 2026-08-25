@@ -20,6 +20,7 @@ Built upon [Good-Tennis](https://github.com/yo-WASSUP/Good-Tennis) (Apache 2.0)
 
 ## 📝 Changelog
 
+- **2026-08-25**: Bounce detection now defaults to a CatBoost model (ported from [yastrebksv/TennisProject](https://github.com/yastrebksv/TennisProject), ±2-frame lag features + 0.45 threshold) with much better landing-point recall; drop the weights at `weights/ctb_regr_bounce.cbm` to enable automatically, falls back to rule-based scoring when missing (see `weights/README.md` for the download).
 - **2026-08-23**: Phase-3 match layer shipped — rule-based shot-type classification, rally segmentation, per-point inference with automatic scoring (`--match-scoring`), match statistics (`match_stats.json`), highlight reel export (`--highlights`), and the point-editing tool `tools/edit_point.py` (edit any point and the whole match is replayed and recalculated).
 - **2026-08-22**: Phase-2 capabilities shipped — fixed-camera calibration (`--court-calibration`), shot speed/spin estimation (`--shot-metrics`), bounce IN/OUT line calling (`--line-call`), a new WASB-SBDT ball-detection backend (`--ball-detector wasb`, alongside yolo/tracknet), and a real-data speed validation tool `tools/validate_speed.py`.
 - **2026-07-02**: Added player position tracking and automatic court outer-corner detection.

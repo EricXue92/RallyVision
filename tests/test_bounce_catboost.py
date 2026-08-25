@@ -1,0 +1,106 @@
+"""CatBoost 弹跳检测路径回归(落点图事故二号,job a9339b9f):
+
+规则评分链的吸附+深度反转否决在「落点后 0.2s 内被回击」的常见场景会误杀
+真落点(14 秒回合只剩 2 个落点)。改走 yastrebksv/TennisProject 的 CatBoost
+模型:特征为 ±2 帧滞后 x/y 差分,阈值 0.45,连续帧合并;收尾只做球场界内
+过滤 + 0.5s 去重(留最高置信,真落点吃掉紧邻击球残余)+ 亚帧 court 精化。
+
+fixture 取自真实 job a9339b9f f115–f160:f134 是确认真落点(置信 1.0),
+f142 是球拍击球帧(CatBoost 误报 0.76,应被 f134 的去重窗口吃掉)。
+"""
+import os
+
+import pytest
+
+from tennis_analysis.analysis.bounce import BounceDetector, TrajectoryPoint
+
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "weights", "ctb_regr_bounce.cbm")
+
+# (frame, image_x, image_y, court_x, court_y) — job a9339b9f 清洗后轨迹片段
+REAL_SNIPPET = [
+    (115, 810.0, 122.0, 9.96, -4.39),
+    (116, 802.0, 130.0, 9.65, -3.32),
+    (117, 800.0, 132.0, 9.58, -3.06),
+    (118, 791.0, 140.0, 9.27, -2.06),
+    (119, 782.0, 148.0, 8.95, -1.06),
+    (120, 772.0, 160.0, 8.6, 0.34),
+    (121, 764.0, 168.0, 8.34, 1.23),
+    (122, 754.0, 182.0, 8.01, 2.7),
+    (123, 742.0, 196.0, 7.65, 4.08),
+    (124, 736.0, 210.0, 7.45, 5.38),
+    (125, 722.0, 226.0, 7.08, 6.77),
+    (126, 714.0, 242.0, 6.87, 8.07),
+    (127, 704.0, 258.0, 6.62, 9.29),
+    (128, 694.0, 282.0, 6.37, 10.98),
+    (129, 684.0, 300.0, 6.16, 12.15),
+    (130, 670.0, 328.0, 5.88, 13.82),
+    (131, 660.0, 350.0, 5.69, 15.03),
+    (132, 650.0, 370.0, 5.52, 16.06),
+    (133, 636.0, 410.0, 5.3, 17.92),
+    (134, 628.0, 420.0, 5.18, 18.35),
+    (135, 616.0, 422.0, 4.99, 18.43),
+    (136, 608.0, 426.0, 4.88, 18.6),
+    (137, 598.0, 432.0, 4.73, 18.85),
+    (138, 586.0, 442.0, 4.56, 19.25),
+    (139, 574.0, 448.0, 4.39, 19.49),
+    (140, 562.0, 462.0, 4.24, 20.02),
+    (141, 550.0, 472.0, 4.09, 20.39),
+    (142, 540.0, 486.0, 3.97, 20.89),
+    (143, 534.7, 478.0, 3.88, 20.6),
+    (144, 529.3, 470.0, 3.78, 20.31),
+    (145, 524.0, 462.0, 3.69, 20.02),
+    (146, 526.0, 436.0, 3.65, 19.01),
+    (147, 528.0, 404.0, 3.6, 17.65),
+    (148, 532.0, 382.0, 3.6, 16.64),
+    (149, 532.0, 359.0, 3.52, 15.46),
+    (150, 532.0, 336.0, 3.45, 14.27),
+    (151, 532.0, 320.0, 3.39, 13.36),
+    (152, 534.0, 304.0, 3.37, 12.4),
+    (153, 532.0, 286.0, 3.26, 11.25),
+    (154, 532.0, 274.0, 3.21, 10.43),
+    (155, 532.0, 258.0, 3.13, 9.29),
+    (156, 532.0, 252.0, 3.11, 8.84),
+    (157, 530.0, 242.0, 3.02, 8.07),
+    (158, 530.0, 232.0, 2.97, 7.27),
+    (159, 530.0, 226.0, 2.93, 6.77),
+    (160, 528.0, 220.0, 2.86, 6.26),
+]
+
+
+def _points():
+    return [
+        TrajectoryPoint(frame=f, time_sec=f / 25.0, image=[x, y], court=[cx, cy])
+        for f, x, y, cx, cy in REAL_SNIPPET
+    ]
+
+
+requires_model = pytest.mark.skipif(
+    not os.path.exists(MODEL_PATH), reason="weights/ctb_regr_bounce.cbm not downloaded"
+)
+
+
+@requires_model
+def test_catboost_finds_real_bounce_and_dedupes_hit_frame():
+    detector = BounceDetector(fps=25.0, classifier_path=MODEL_PATH)
+    events = detector.detect_from_points(_points())
+    frames = [event["frame"] for event in events]
+    # f134 真落点必须在(±1 容忍连续帧合并的取整)
+    assert any(abs(frame - 134) <= 1 for frame in frames), frames
+    # f142 击球帧的误报必须被 f134 的去重窗口吃掉
+    assert all(abs(frame - 142) > 2 for frame in frames), frames
+    assert all(event["method"] == "catboost_lag2" for event in events)
+
+
+@requires_model
+def test_catboost_classifier_kind_dispatch():
+    detector = BounceDetector(fps=25.0, classifier_path=MODEL_PATH)
+    assert detector._load_classifier() is not None
+    assert detector._classifier_kind == "catboost"
+
+
+def test_missing_cbm_falls_back_to_rule_scoring():
+    detector = BounceDetector(fps=25.0, classifier_path="weights/no_such_model.cbm")
+    assert detector._load_classifier() is None
+    # 规则路径仍可跑通(不因 classifier 缺失崩溃)
+    events = detector.detect_from_points(_points())
+    assert isinstance(events, list)

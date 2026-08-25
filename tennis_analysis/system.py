@@ -147,6 +147,9 @@ class TennisAnalysisSystem:
         self.player_detect_interval = max(1, int(player_detect_interval))
         self.show_pose_roi = show_pose_roi
         self.court_detection = court_detection
+        # 未显式指定弹跳分类器时,默认启用 CatBoost 落点模型(缺权重则回退规则评分)
+        if not bounce_classifier_path and os.path.exists('weights/ctb_regr_bounce.cbm'):
+            bounce_classifier_path = 'weights/ctb_regr_bounce.cbm'
         self.bounce_classifier_path = bounce_classifier_path
         self.court_match_width = court_match_width
 
@@ -423,7 +426,11 @@ class TennisAnalysisSystem:
             "analysis": {
                 "court_detection": self.court_detection,
                 "bounce_detection": self.show_bounce_detection,
-                "bounce_method": "rule_lag20_postprocess" if not self.bounce_classifier_path else "clf_lag20_postprocess",
+                "bounce_method": (
+                    "rule_lag20_postprocess" if not self.bounce_classifier_path
+                    else "catboost_lag2" if self.bounce_classifier_path.endswith(".cbm")
+                    else "clf_lag20_postprocess"
+                ),
                 "bounce_classifier": self.bounce_classifier_path,
                 "mini_map": self.show_mini_map,
                 "court_calibration": self.court_calibration,
