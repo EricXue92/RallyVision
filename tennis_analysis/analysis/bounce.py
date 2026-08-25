@@ -238,10 +238,20 @@ class BounceDetector:
             )
         return events
 
+    # 边缘分候选的触地旁证:CatBoost 原始输出低于此值时,要求 ±该半径帧内
+    # 存在图像 y 内部局部峰(屏幕最低点=触地)。已核数据:深度反转/局部峰值
+    # 等逐帧硬否决在本管线全不可用(事件帧有 ±4 帧时间松散 + 空中投影伪影),
+    # 只有「模型自己不确定时才要旁证」这一档能把 job 7bb0934f 的 f188 击球
+    # 误报(0.451)和 f172 真落点(0.459)分开,不要把它改成对全量候选的否决
+    # (f99 真落点 0.68 无峰,全量否决会误杀)。
+    CATBOOST_CONFIDENT = 0.60
+    TOUCHDOWN_PEAK_RADIUS = 3
+
     def _finalize_events(self, points, events):
-        """CatBoost 路径的收尾:去重(0.5s 窗口留最高置信,真落点会吃掉紧邻的
-        击球残余候选)+ segments.refine_bounce 亚帧插值 court 坐标。
-        不做规则链的 y-max 吸附与深度反转否决。"""
+        """CatBoost 路径的收尾:边缘分触地旁证(去重**之前**,否则高分击球
+        误报先吃掉相邻真落点再被丢,两头落空)+ 去重(0.5s 窗口留最高置信,
+        真落点会吃掉紧邻的击球残余候选)+ segments.refine_bounce 亚帧插值
+        court 坐标。不做规则链的 y-max 吸附与深度反转否决。"""
         if not events:
             return events
         from .segments import refine_bounce
@@ -255,8 +265,16 @@ class BounceDetector:
             }
             for point in points
         ]
+        image_y_by_frame = {
+            p["frame"]: p["image"][1] for p in dict_points if p["image"] is not None
+        }
+        kept = [
+            event for event in events
+            if event["diagnostics"]["raw_prediction"] >= self.CATBOOST_CONFIDENT
+            or self._touchdown_peak_near(image_y_by_frame, int(event["frame"]))
+        ]
         refined_events = []
-        for event in self._dedupe_events(events):
+        for event in self._dedupe_events(kept):
             try:
                 _, refined_court = refine_bounce(dict_points, int(event["frame"]))
             except (ValueError, TypeError):
@@ -267,6 +285,19 @@ class BounceDetector:
                 event["court"] = [round(float(refined_court[0]), 2), round(float(refined_court[1]), 2)]
             refined_events.append(event)
         return refined_events
+
+    def _touchdown_peak_near(self, image_y_by_frame, frame):
+        """±TOUCHDOWN_PEAK_RADIUS 帧内是否存在图像 y 内部局部峰(两侧相邻帧都
+        不高于它)。轨迹缺帧评不出峰时放行(fail open,不因数据洞杀真落点)。"""
+        evaluable = False
+        for f in range(frame - self.TOUCHDOWN_PEAK_RADIUS, frame + self.TOUCHDOWN_PEAK_RADIUS + 1):
+            if f not in image_y_by_frame or (f - 1) not in image_y_by_frame or (f + 1) not in image_y_by_frame:
+                continue
+            evaluable = True
+            y = image_y_by_frame[f]
+            if y >= image_y_by_frame[f - 1] and y >= image_y_by_frame[f + 1]:
+                return True
+        return not evaluable
 
     def _detect_with_classifier(self, classifier, points, coords, velocity):
         feature_rows = []
