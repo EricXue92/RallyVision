@@ -54,6 +54,7 @@ def build_cli_args(video_path, output_dir, params):
         "--highlights", "true",
         "--display", "false",
         "--visualize-positions", "false",
+        "--language", "zh",
     ]
     for k, v in merged.items():
         if isinstance(v, bool):

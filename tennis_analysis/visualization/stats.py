@@ -41,8 +41,8 @@ class StatsVisualizer:
         self.texts = {
             'zh': {
                 'rally': '回合',
-                'upper_player': '上场球员',
-                'lower_player': '下场球员',
+                'upper_player': '远端球员',
+                'lower_player': '近处球员',
                 'stats': '统计',
                 'current_speed': '当前速度',
                 'current_rally': '当前回合',
@@ -72,7 +72,12 @@ class StatsVisualizer:
         }
 
     def _find_chinese_font(self):
+        # 仓库自带 simhei.ttf 优先(worker 跑在 macOS,Windows 字体路径找不到会静默退回英文渲染)
+        bundled = os.path.join(os.path.dirname(__file__), "..", "..", "simhei.ttf")
         font_paths = [
+            os.path.abspath(bundled),
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+            "/System/Library/Fonts/PingFang.ttc",
             "C:/Windows/Fonts/simhei.ttf",
             "C:/Windows/Fonts/simsun.ttc",
             "C:/Windows/Fonts/simkai.ttf",
