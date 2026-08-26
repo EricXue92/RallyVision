@@ -20,10 +20,10 @@ def load_runtime_dependencies():
     global BounceDetector, MiniMapVisualizer
     global PlayerPoseVisualizer, StatsVisualizer, RTMPoseProcessor, YOLOPoseProcessor, YOLOPersonDetector, vap
     global JsonlDetectionWriter, write_json, SCHEMA_VERSION
-    global CourtKeypointDetector, COURT_KEYPOINTS_M, CameraModel
+    global CourtKeypointDetector, COURT_KEYPOINTS_M, CameraModel, calibrate_with_outlier_rejection
     global median_keypoints_over_frames, keypoints_drifted
     global compute_shot_metrics_entries, write_shot_metrics, call_bounce
-    global TrackNetBallDetector, TrackNetBallTrackerAdapter
+    global TrackNetBallDetector, TrackNetBallTrackerAdapter, compute_far_roi_rect
     global WASBBallDetector, WASBBallTrackerAdapter
 
     yolo_config_dir = os.path.join(tempfile.gettempdir(), "good-tennis-ultralytics")
@@ -54,6 +54,7 @@ def load_runtime_dependencies():
         from .court.keypoint_detector import CourtKeypointDetector as _CourtKeypointDetector
         from .court.keypoint_detector import COURT_KEYPOINTS_M as _COURT_KEYPOINTS_M
         from .court.camera import CameraModel as _CameraModel
+        from .court.camera import calibrate_with_outlier_rejection as _calibrate_with_outlier_rejection
         from .court.camera_calibration import median_keypoints_over_frames as _median_keypoints_over_frames
         from .court.camera_calibration import keypoints_drifted as _keypoints_drifted
         from .analysis.shot_pipeline import compute_shot_metrics_entries as _compute_shot_metrics_entries
@@ -61,6 +62,7 @@ def load_runtime_dependencies():
         from .analysis.line_call import call_bounce as _call_bounce
         from .detection.tracknet_ball import TrackNetBallDetector as _TrackNetBallDetector
         from .detection.tracknet_ball import TrackNetBallTrackerAdapter as _TrackNetBallTrackerAdapter
+        from .detection.tracknet_ball import compute_far_roi_rect as _compute_far_roi_rect
         from .detection.wasb_ball import WASBBallDetector as _WASBBallDetector
         from .detection.wasb_ball import WASBBallTrackerAdapter as _WASBBallTrackerAdapter
     except ModuleNotFoundError as exc:
@@ -101,6 +103,7 @@ def load_runtime_dependencies():
     CourtKeypointDetector = _CourtKeypointDetector
     COURT_KEYPOINTS_M = _COURT_KEYPOINTS_M
     CameraModel = _CameraModel
+    calibrate_with_outlier_rejection = _calibrate_with_outlier_rejection
     median_keypoints_over_frames = _median_keypoints_over_frames
     keypoints_drifted = _keypoints_drifted
     compute_shot_metrics_entries = _compute_shot_metrics_entries
@@ -108,6 +111,7 @@ def load_runtime_dependencies():
     call_bounce = _call_bounce
     TrackNetBallDetector = _TrackNetBallDetector
     TrackNetBallTrackerAdapter = _TrackNetBallTrackerAdapter
+    compute_far_roi_rect = _compute_far_roi_rect
     WASBBallDetector = _WASBBallDetector
     WASBBallTrackerAdapter = _WASBBallTrackerAdapter
 
@@ -132,7 +136,7 @@ class TennisAnalysisSystem:
                  shot_metrics=True, line_call='doubles',
                  match_scoring=False, first_server='lower',
                  upper_hand='right', lower_hand='right',
-                 best_of=3, no_ad=False, highlights=False):
+                 best_of=3, no_ad=False, highlights=False, far_roi=True):
         self.video_path = video_path
         self.show_display = show_display
         self.language = language
@@ -155,6 +159,9 @@ class TennisAnalysisSystem:
 
         # Task 10: shot metrics / spin / line calling 主流程接线
         self.ball_detector = ball_detector  # 'yolo' | 'tracknet' | 'wasb'
+        self.far_roi = bool(far_roi)  # 远场 ROI 二次推理开关（仅 tracknet 后端生效）
+        self._far_roi_rect_cache = None
+        self._far_roi_rect_computed = False
         self.tracknet_model_path = tracknet_model_path
         self.wasb_model_path = wasb_model_path
         self.court_calibration = court_calibration  # 'keypoints' | 'homography'（强制降级）
@@ -514,9 +521,16 @@ class TennisAnalysisSystem:
             # Task 9b Step 1：球员框 gating 只接入 TrackNet/WASB 两个热图后端
             # （brief 明确范围），YOLO 后端沿用旧调用不传 player_centers。
             player_centers = self._player_centers_for_gating(centroids)
-            detected_ball_position = self.tennis_ball_tracker.detect_ball(
-                frame, roi_corners=roi_corners, player_centers=player_centers
-            )
+            if self.ball_detector == 'tracknet':
+                # 远场 ROI 二次推理仅接入 tracknet 后端（WASB 是备用后端，签名不动）
+                detected_ball_position = self.tennis_ball_tracker.detect_ball(
+                    frame, roi_corners=roi_corners, player_centers=player_centers,
+                    far_roi_rect=self._far_roi_rect_for_ball(),
+                )
+            else:
+                detected_ball_position = self.tennis_ball_tracker.detect_ball(
+                    frame, roi_corners=roi_corners, player_centers=player_centers
+                )
         else:
             detected_ball_position = self.tennis_ball_tracker.detect_ball(frame, roi_corners=roi_corners)
         ball_position = self.tennis_ball_tracker.update_trajectory(detected_ball_position, roi_corners)
@@ -1332,6 +1346,8 @@ class TennisAnalysisSystem:
     CAMERA_MAX_REPROJECTION_ERROR_PX = 15.0
     # 漂移守卫：标定完成后每 CAMERA_DRIFT_CHECK_INTERVAL_FRAMES（约 30s@30fps）帧重检 1 帧；
     # 命中漂移则用其后 CAMERA_RECALIBRATION_WINDOW_FRAMES 帧（同样每 10 帧抽 1 帧）重新标定。
+    # 单关键点重投影误差超过此值即视为稳定检错的外点，剔除后重标定
+    CAMERA_KEYPOINT_OUTLIER_THRESHOLD_PX = 10.0
     CAMERA_DRIFT_CHECK_INTERVAL_FRAMES = 900
     CAMERA_DRIFT_THRESHOLD_PX = 10.0
     CAMERA_DRIFT_MIN_KEYPOINTS = 4
@@ -1440,6 +1456,32 @@ class TennisAnalysisSystem:
         finally:
             cap.release()
 
+    def _far_roi_rect_for_ball(self):
+        """远场 ROI 裁剪矩形（懒计算 + 缓存）：远端两底线角（image_court_corners
+        前两点，世界 y=0 底线）+ 球网两端图像坐标 交给 compute_far_roi_rect。
+        开关关闭 / 非 tracknet 后端 / 尚无球场标定 / 矩形退化时返回 None
+        （detect_ball 收到 None 即退回单次全帧推理）。球场角点整段视频固定
+        （手动/自动标注一次），矩形只算一次。"""
+        if not getattr(self, 'far_roi', False) or self.ball_detector != 'tracknet':
+            return None
+        if getattr(self, '_far_roi_rect_computed', False):
+            return self._far_roi_rect_cache
+        mapper = getattr(self, 'court_mapper', None)
+        if mapper is None:
+            return None  # 标定尚未就绪时不落缓存，下次再试
+        net_y = mapper.court_dimensions[1] / 2
+        net_left = mapper.court_to_image((0.0, net_y))
+        net_right = mapper.court_to_image((mapper.court_dimensions[0], net_y))
+        far_points = [
+            tuple(mapper.image_court_corners[0]),
+            tuple(mapper.image_court_corners[1]),
+            tuple(net_left),
+            tuple(net_right),
+        ]
+        self._far_roi_rect_cache = compute_far_roi_rect(far_points, self.frame_width, self.frame_height)
+        self._far_roi_rect_computed = True
+        return self._far_roi_rect_cache
+
     def _sample_keypoint_detections(self, cap, detector, start_frame, span_frames, step):
         """在 1-indexed 帧号区间 [start_frame, min(start_frame+span_frames-1, total_frames)]
         内每 step 帧抽 1 帧跑关键点检测，返回检测结果不为 None 的 np.ndarray[14,2] 列表
@@ -1468,8 +1510,24 @@ class TennisAnalysisSystem:
 
         image_points = median_points[valid_mask]
         world_points = COURT_KEYPOINTS_M[valid_mask]
-        camera = CameraModel.calibrate(image_points, world_points, (self.frame_width, self.frame_height))
-        error = camera.reprojection_error(image_points, world_points)
+        # 带外点剔除的标定（CourtCheck 重投影误差择优思想）：某关键点被检测
+        # 模型稳定检错时（中位数救不了），全点一把梭会把单应整体拉偏 → 所有
+        # 落点系统性偏移。剔除保底 CAMERA_MIN_VALID_KEYPOINTS 个点；15px
+        # 整体门限只看保留下来的内点。
+        camera, inlier_mask = calibrate_with_outlier_rejection(
+            image_points, world_points, (self.frame_width, self.frame_height),
+            point_error_threshold_px=self.CAMERA_KEYPOINT_OUTLIER_THRESHOLD_PX,
+            min_points=self.CAMERA_MIN_VALID_KEYPOINTS,
+        )
+        rejected_count = int((~inlier_mask).sum())
+        if rejected_count:
+            valid_count = int(inlier_mask.sum())
+            print(
+                f"提示：{rejected_count} 个关键点重投影误差过大被剔除，剩 {valid_count} 个参与标定 / "
+                f"Notice: rejected {rejected_count} keypoint(s) with excessive reprojection error, "
+                f"{valid_count} keypoint(s) used for calibration"
+            )
+        error = camera.reprojection_error(image_points[inlier_mask], world_points[inlier_mask])
         if error > self.CAMERA_MAX_REPROJECTION_ERROR_PX:
             print(
                 f"警告：重投影误差 {error:.1f}px > 15px，降级为单应性模式 / "

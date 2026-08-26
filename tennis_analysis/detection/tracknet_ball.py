@@ -64,6 +64,53 @@ def _euclidean_distance(point_a, point_b):
     return float(np.hypot(point_a[0] - point_b[0], point_a[1] - point_b[1]))
 
 
+# 远场 ROI 二次推理（CourtCheck infer_with_far_roi 思想，代码全部重写——上游
+# 无 License，只移植算法思路）：整帧压到 640x360 后远半场的球只剩 1~2 像素，
+# 是发球/深球检测洞的主因。远场矩形 = 远半场四点（远端两底线角 + 球网两端
+# 的图像坐标）bbox 加 padding：左右各 10% bbox 宽；上方 35% bbox 高（球飞行
+# 弧线与底线后落点都在底线上方）；下方 10% bbox 高。
+_FAR_ROI_HORIZONTAL_PAD_RATIO = 0.10
+_FAR_ROI_TOP_PAD_RATIO = 0.35
+_FAR_ROI_BOTTOM_PAD_RATIO = 0.10
+_FAR_ROI_MIN_POINTS = 3
+
+
+def compute_far_roi_rect(image_points, frame_width, frame_height):
+    """远半场图像点集 -> 裁剪矩形 (x1, y1, x2, y2)（int，已 clamp 到帧内）。
+
+    image_points 通常是 [远端左底角, 远端右底角, 网左端, 网右端] 的图像坐标。
+    含 NaN 的点被剔除；有效点 < 3、bbox 零宽/零高、或 clamp 后矩形无面积时
+    返回 None（调用方视为不启用远场二次推理，行为退回单次全帧推理）。
+    """
+    points = [
+        (float(p[0]), float(p[1]))
+        for p in image_points
+        if p is not None and len(p) == 2 and np.isfinite(p[0]) and np.isfinite(p[1])
+    ]
+    if len(points) < _FAR_ROI_MIN_POINTS:
+        return None
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    box_w = max(xs) - min(xs)
+    box_h = max(ys) - min(ys)
+    if box_w <= 0 or box_h <= 0:
+        return None
+    x1 = int(round(min(xs) - box_w * _FAR_ROI_HORIZONTAL_PAD_RATIO))
+    x2 = int(round(max(xs) + box_w * _FAR_ROI_HORIZONTAL_PAD_RATIO))
+    y1 = int(round(min(ys) - box_h * _FAR_ROI_TOP_PAD_RATIO))
+    y2 = int(round(max(ys) + box_h * _FAR_ROI_BOTTOM_PAD_RATIO))
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(int(frame_width), x2), min(int(frame_height), y2)
+    if x2 - x1 <= 0 or y2 - y1 <= 0:
+        return None
+    return (x1, y1, x2, y2)
+
+
+def _point_in_rect(point, rect):
+    x1, y1, x2, y2 = rect
+    return x1 <= point[0] <= x2 and y1 <= point[1] <= y2
+
+
 def is_implausible_ball_jump(
     candidate_point,
     last_accepted_point,
@@ -145,6 +192,10 @@ class TrackNetBallDetector:
         self.show_performance_stats = show_performance_stats
 
         self._frame_window = deque(maxlen=_WINDOW_SIZE)
+        # 远场 ROI 二次推理的独立滑窗（裁剪帧）；矩形变化（重标定）时重置，
+        # 避免窗口内裁剪几何不一致
+        self._far_frame_window = deque(maxlen=_WINDOW_SIZE)
+        self._last_far_rect = None
         self.last_detection = self._empty_detection_state()
         self._last_accepted_point = None  # Task 9b gating：上一帧被接受的球点（跨帧持久）
 
@@ -153,7 +204,7 @@ class TrackNetBallDetector:
         else:
             self._model_fn = _TorchBallTrackerNetAdapter(model_path, device=device)
 
-    def detect_ball(self, frame, conf=_DEFAULT_CONF_THRESHOLD, roi_corners=None, player_centers=None):
+    def detect_ball(self, frame, conf=_DEFAULT_CONF_THRESHOLD, roi_corners=None, player_centers=None, far_roi_rect=None):
         t0 = time.time()
         orig_h, orig_w = frame.shape[:2]
 
@@ -166,13 +217,25 @@ class TrackNetBallDetector:
 
         peak_point, raw_confidence = self._peak_from_heatmap(heatmap, conf)
 
-        final_point = None
+        full_point = None
         if peak_point is not None:
             scale_x = orig_w / self.input_width
             scale_y = orig_h / self.input_height
-            scaled = (int(peak_point[0] * scale_x), int(peak_point[1] * scale_y))
-            if self._point_in_roi(scaled, roi_corners):
-                final_point = scaled
+            full_point = (int(peak_point[0] * scale_x), int(peak_point[1] * scale_y))
+
+        # 远场 ROI 二次推理与融合：全帧漏检时用远场结果补洞；两边都检到且全帧
+        # 结果落在远场矩形内时优先远场结果（裁剪后有效分辨率更高，坐标更准）。
+        # 融合发生在 ROI 过滤 / 球员 gating 之前——两道守卫统一作用于融合结果。
+        candidate, candidate_confidence = full_point, raw_confidence
+        if far_roi_rect is not None:
+            far_point, far_confidence = self._detect_in_far_roi(frame, far_roi_rect, conf)
+            if far_point is not None and (full_point is None or _point_in_rect(full_point, far_roi_rect)):
+                candidate, candidate_confidence = far_point, far_confidence
+
+        final_point = None
+        raw_confidence = candidate_confidence
+        if candidate is not None and self._point_in_roi(candidate, roi_corners):
+            final_point = candidate
 
         # Task 9b Step 1：球员框 gating——ROI 通过之后再过一道「跳变且远离
         # 所有球员」的误检过滤（is_implausible_ball_jump 是纯函数，player_centers
@@ -213,7 +276,34 @@ class TrackNetBallDetector:
     def clear(self):
         self._last_accepted_point = None
         self._frame_window.clear()
+        self._far_frame_window.clear()
+        self._last_far_rect = None
         self.last_detection = self._empty_detection_state()
+
+    def _detect_in_far_roi(self, frame, far_rect, conf):
+        """远场裁剪二次推理：裁剪 -> resize 到模型输入分辨率 -> 推理 -> 峰值
+        坐标按裁剪矩形回映射到帧坐标。返回 (point 或 None, confidence 或 None)。"""
+        if far_rect != self._last_far_rect:
+            self._far_frame_window.clear()
+            self._last_far_rect = far_rect
+        x1, y1, x2, y2 = far_rect
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            return None, None
+        resized = cv2.resize(crop, (self.input_width, self.input_height))
+        self._far_frame_window.append(resized)
+        while len(self._far_frame_window) < _WINDOW_SIZE:
+            self._far_frame_window.appendleft(self._far_frame_window[0])
+
+        frames_newest_first = list(self._far_frame_window)[::-1]
+        stacked = np.concatenate(frames_newest_first, axis=2).astype(np.float32) / 255.0
+        heatmap = np.asarray(self._model_fn(np.rollaxis(stacked, 2, 0)), dtype=np.float32)
+        peak_point, confidence = self._peak_from_heatmap(heatmap, conf)
+        if peak_point is None:
+            return None, confidence
+        scale_x = (x2 - x1) / self.input_width
+        scale_y = (y2 - y1) / self.input_height
+        return (int(x1 + peak_point[0] * scale_x), int(y1 + peak_point[1] * scale_y)), confidence
 
     def _update_frame_window(self, frame):
         resized = cv2.resize(frame, (self.input_width, self.input_height))
@@ -276,8 +366,10 @@ class TrackNetBallTrackerAdapter:
         self.tennis_ball_trajectory = deque(maxlen=trajectory_length)
         self.last_valid_position = None
 
-    def detect_ball(self, frame, roi_corners=None, player_centers=None):
-        return self._detector.detect_ball(frame, roi_corners=roi_corners, player_centers=player_centers)
+    def detect_ball(self, frame, roi_corners=None, player_centers=None, far_roi_rect=None):
+        return self._detector.detect_ball(
+            frame, roi_corners=roi_corners, player_centers=player_centers, far_roi_rect=far_roi_rect
+        )
 
     def update_trajectory(self, ball_position, roi_corners=None):
         if ball_position is None or list(ball_position) == [0, 0]:

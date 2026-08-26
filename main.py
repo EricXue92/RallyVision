@@ -26,6 +26,7 @@ def main():
     parser.add_argument('--ball-detector', default='yolo', choices=['yolo', 'tracknet', 'wasb'], type=str, help='球检测后端：yolo、tracknet 或 wasb')
     parser.add_argument('--tracknet-model', default='weights/tracknet_ball.pt', type=str, help='TrackNet 网球检测模型路径（--ball-detector tracknet 时使用）')
     parser.add_argument('--wasb-model', default='weights/wasb_tennis.pth', type=str, help='WASB-SBDT 网球检测模型路径（--ball-detector wasb 时使用）')
+    parser.add_argument('--far-roi', choices=['true', 'false'], default='true', help='远场 ROI 二次推理（仅 tracknet 后端）：远半场裁剪放大后再检一次，补远场小球漏检，默认 true')
     parser.add_argument('--player-detector', default='yolo-person', choices=['pose', 'yolo-person'], help='球员检测方式：pose 使用姿态关键点，yolo-person 使用 YOLO 人框底部中点')
     parser.add_argument('--person-model', default='weights/yolo26s.pt', type=str, help='YOLO 人体目标检测模型路径或模型名，默认 weights/yolo26s.pt')
     parser.add_argument('--person-tracker', default='botsort', choices=['none', 'botsort', 'bytetrack'], help='YOLO 人体框多目标跟踪器：none、botsort 或 bytetrack，默认 botsort')
@@ -97,6 +98,7 @@ def main():
         bounce_classifier_path=args.bounce_classifier,
         show_mini_map=args.mini_map == 'true',
         ball_detector=args.ball_detector,
+        far_roi=args.far_roi == 'true',
         tracknet_model_path=args.tracknet_model,
         wasb_model_path=args.wasb_model,
         court_calibration=args.court_calibration,

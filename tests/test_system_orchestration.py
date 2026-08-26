@@ -28,7 +28,7 @@ import numpy as np
 
 import tennis_analysis.system as system_module
 from tennis_analysis.system import TennisAnalysisSystem
-from tennis_analysis.court.camera import CameraModel
+from tennis_analysis.court.camera import CameraModel, calibrate_with_outlier_rejection
 from tennis_analysis.court.camera_calibration import keypoints_drifted, median_keypoints_over_frames
 from tennis_analysis.court.keypoint_detector import COURT_KEYPOINTS_M
 
@@ -243,6 +243,7 @@ def _patch_calibration_globals(monkeypatch, provider):
     monkeypatch.setattr(system_module, "median_keypoints_over_frames", median_keypoints_over_frames, raising=False)
     monkeypatch.setattr(system_module, "keypoints_drifted", keypoints_drifted, raising=False)
     monkeypatch.setattr(system_module, "CameraModel", CameraModel, raising=False)
+    monkeypatch.setattr(system_module, "calibrate_with_outlier_rejection", calibrate_with_outlier_rejection, raising=False)
     monkeypatch.setattr(system_module, "COURT_KEYPOINTS_M", COURT_KEYPOINTS_M, raising=False)
 
 
