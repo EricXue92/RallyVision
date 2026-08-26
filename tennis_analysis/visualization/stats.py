@@ -3,6 +3,77 @@ import numpy as np
 import os
 from PIL import Image, ImageDraw, ImageFont
 
+
+def find_chinese_font():
+    """找可用的中文字体文件。仓库自带 simhei.ttf 优先(worker 跑在 macOS,
+    Windows 字体路径找不到会静默退回英文渲染);找不到返回 None。"""
+    bundled = os.path.join(os.path.dirname(__file__), "..", "..", "simhei.ttf")
+    font_paths = [
+        os.path.abspath(bundled),
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/simsun.ttc",
+        "C:/Windows/Fonts/simkai.ttf",
+        "C:/Windows/Fonts/msyh.ttc",
+    ]
+    for path in font_paths:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+class TextPatchRenderer:
+    """把文本预渲染成 BGRA 贴片并缓存,逐帧 alpha 贴图——供第二遍标注(bounce
+    annotate)在每帧画中文用,避免整帧 PIL 往返的开销。找不到中文字体时
+    render() 返回 None,调用方自行降级(如 cv2 画 ASCII)。"""
+
+    def __init__(self):
+        self.font_path = find_chinese_font()
+        self._font_cache = {}
+        self._patch_cache = {}
+
+    def _get_font(self, font_size):
+        if font_size not in self._font_cache:
+            self._font_cache[font_size] = ImageFont.truetype(self.font_path, font_size)
+        return self._font_cache[font_size]
+
+    def render(self, text, font_size, color_bgr):
+        """返回 (H, W, 4) 的 RGBA ndarray(按 BGR 语义排布好,可直接贴 BGR 帧);
+        无字体时返回 None。"""
+        if self.font_path is None:
+            return None
+        key = (text, font_size, color_bgr)
+        if key not in self._patch_cache:
+            font = self._get_font(font_size)
+            bbox = font.getbbox(text)
+            w = max(1, bbox[2] - bbox[0] + 4)
+            h = max(1, bbox[3] - bbox[1] + 4)
+            img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            b, g, r = color_bgr
+            draw.text((2 - bbox[0], 2 - bbox[1]), text, font=font, fill=(r, g, b, 255))
+            rgba = np.array(img)
+            bgra = rgba[:, :, [2, 1, 0, 3]].copy()
+            self._patch_cache[key] = bgra
+        return self._patch_cache[key]
+
+    @staticmethod
+    def blit(frame, patch, position):
+        """把 BGRA 贴片 alpha 合成到 BGR 帧上,position=(x, y) 为左上角,越界自动裁剪。"""
+        x, y = int(position[0]), int(position[1])
+        fh, fw = frame.shape[:2]
+        ph, pw = patch.shape[:2]
+        x0, y0 = max(0, x), max(0, y)
+        x1, y1 = min(fw, x + pw), min(fh, y + ph)
+        if x0 >= x1 or y0 >= y1:
+            return
+        sub = patch[y0 - y : y1 - y, x0 - x : x1 - x]
+        alpha = sub[:, :, 3:4].astype(np.float32) / 255.0
+        roi = frame[y0:y1, x0:x1].astype(np.float32)
+        frame[y0:y1, x0:x1] = (sub[:, :, :3].astype(np.float32) * alpha + roi * (1.0 - alpha)).astype(np.uint8)
+
+
 class StatsVisualizer:
     """
     统计信息可视化器，负责绘制文本和球员统计信息面板
@@ -72,21 +143,7 @@ class StatsVisualizer:
         }
 
     def _find_chinese_font(self):
-        # 仓库自带 simhei.ttf 优先(worker 跑在 macOS,Windows 字体路径找不到会静默退回英文渲染)
-        bundled = os.path.join(os.path.dirname(__file__), "..", "..", "simhei.ttf")
-        font_paths = [
-            os.path.abspath(bundled),
-            "/System/Library/Fonts/STHeiti Medium.ttc",
-            "/System/Library/Fonts/PingFang.ttc",
-            "C:/Windows/Fonts/simhei.ttf",
-            "C:/Windows/Fonts/simsun.ttc",
-            "C:/Windows/Fonts/simkai.ttf",
-            "C:/Windows/Fonts/msyh.ttc",
-        ]
-        for path in font_paths:
-            if os.path.exists(path):
-                return path
-        return None
+        return find_chinese_font()
 
     def _get_font(self, font_scale):
         font_size = max(8, int(font_scale * 30))
@@ -149,22 +206,27 @@ class StatsVisualizer:
             # 将PIL图像转回OpenCV格式并替换原始帧
             frame[:] = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
     
-    def draw_player_stats(self, frame, movement_stats, rally_count):
+    def rally_label_geometry(self):
+        """回合数标签的 (position, font_scale):第一遍不再画回合数(镜头切换计数对
+        固定机位恒为 1,误导),由第二遍标注用真回合切分在同一位置补画——几何参数
+        单一来源在这里,两遍共用。"""
+        rally_pos_y = int(self.panel_height + self.frame_height * 0.1)  # 第一个面板下方
+        return (self.margin, rally_pos_y), self.font_scale * 1.5
+
+    def draw_player_stats(self, frame, movement_stats, rally_count=None):
         """
         在画面上显示球员统计信息，包括当前回合和整场比赛数据
-        
+
         参数:
             frame: 视频帧
             movement_stats: 球员统计信息
-            rally_count: 当前回合数
+            rally_count: 当前回合数;None = 不画(回合数改由第二遍标注画真值)
         """
-        # 计算回合数显示位置，基于视频尺寸
-        rally_pos_y = int(self.panel_height + self.frame_height * 0.1) # 第一个面板下方
-              
-        # 使用语言配置显示回合数
         text_items = []
-        rally_text = f"{self.texts[self.language]['rally']}: {rally_count}"
-        text_items.append((rally_text, (self.margin, rally_pos_y), self.font_scale*1.5, (0, 165, 255), self.thickness+2))
+        if rally_count is not None:
+            (rally_pos, rally_scale) = self.rally_label_geometry()
+            rally_text = f"{self.texts[self.language]['rally']}: {rally_count}"
+            text_items.append((rally_text, rally_pos, rally_scale, (0, 165, 255), self.thickness+2))
         
         # 绘制上半场球员统计
         self._draw_player_panel(frame, self.texts[self.language]['upper_player'], movement_stats.get('upper', {}), 

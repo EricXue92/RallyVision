@@ -1,3 +1,4 @@
+import bisect
 import json
 import os
 import pickle
@@ -12,6 +13,7 @@ from sklearn.base import BaseEstimator, TransformerMixin
 
 from ..media.video_audio import encode_vscode_compatible_mp4
 from ..visualization.minimap import MiniMapVisualizer
+from ..visualization.stats import TextPatchRenderer
 
 
 class LegacyColumnConcatenator(BaseEstimator, TransformerMixin):
@@ -370,10 +372,18 @@ class BounceDetector:
         draw_processed_trajectory=True,
         bounce_line_calls=None,
         shot_hits=None,
+        rally_spans=None,
+        rally_label_pos=None,
+        rally_label_font_size=None,
     ):
         """Task 10: 追加 bounce_line_calls（frame -> "in"/"out"/"close"）在弹跳标记旁画判罚，
         shot_hits（hit_frame -> shot_metrics 条目 dict）在击球帧起 1.5s 画 "hitter speed · spin"。
         两者都是可选的（None/空 dict 时行为与 Task 10 之前完全一致）。
+
+        rally_spans（[(start_frame, end_frame), ...] 升序）：真回合切分（extract_rallies
+        口径）。传入时逐帧画「回合: N」——N = 已开始的回合数（当前帧之前/之中最后一个
+        start_frame 的序号），位置/字号由 rally_label_pos / rally_label_font_size 给
+        （几何单一来源在 StatsVisualizer.rally_label_geometry，第一遍已不画回合数）。
         """
         if not events and not trajectory_points:
             return False
@@ -399,6 +409,8 @@ class BounceDetector:
         display_frames = max(1, int((fps or self.fps) * float(display_sec)))
         shot_display_frames = max(1, int((fps or self.fps) * 1.5))
         minimap = MiniMapVisualizer() if draw_minimap_bounces else None
+        self._text_patches = TextPatchRenderer()
+        rally_starts = sorted(int(s) for s, _ in rally_spans) if rally_spans else []
         frame_index = 0
         while True:
             ret, frame = video.read()
@@ -416,6 +428,8 @@ class BounceDetector:
                 self.draw_event(frame, event, age_frames=frame_index - int(event["frame"]), display_frames=display_frames, line_call=line_call)
             if shot_hits:
                 self.draw_active_shot_labels(frame, frame_index, shot_hits, shot_display_frames)
+            if rally_starts and rally_label_pos is not None:
+                self._draw_rally_count(frame, frame_index, rally_starts, rally_label_pos, rally_label_font_size)
             if minimap is not None and active_events:
                 minimap.draw_bounce_events(frame, active_events)
             if minimap is not None and draw_processed_trajectory:
@@ -490,9 +504,16 @@ class BounceDetector:
                 cv2.LINE_AA,
             )
 
+    # 击球标签的中文映射(面板已中文化,这里保持同口径)
+    _HITTER_ZH = {"upper": "远端", "lower": "近处"}
+    _SPIN_ZH = {"topspin": "上旋", "flat": "平击", "slice": "切削"}
+
     def draw_active_shot_labels(self, frame, frame_index, shot_hits, display_frames):
-        """在击球帧起 display_frames 内画 "<hitter> <speed> km/h · <spin_label>"；
-        拟合失败（fit_ok=False，含 homography-only 降级）时速度/旋转显示 "—"。
+        """在击球帧起 display_frames 内画 "<hitter> <speed> km/h · <spin>"。
+
+        中文经 TextPatchRenderer 预渲染贴片绘制——cv2.putText 只认 ASCII,直接画
+        中文/·/— 会变成一串 "?"(踩过);速度/旋转拟合失败(fit_ok=False,含
+        homography-only 降级)时整行只剩占位符,没有信息量,直接不画。
         """
         offset = 0
         for hit_frame, metric in sorted(shot_hits.items()):
@@ -501,12 +522,42 @@ class BounceDetector:
                 continue
             speed = metric.get("speed_kmh")
             spin_label = metric.get("spin_label")
-            speed_text = f"{speed:.0f} km/h" if speed is not None else "—"
-            spin_text = spin_label if spin_label else "—"
-            text = f"{metric.get('hitter', '?')} {speed_text} · {spin_text}"
-            y = 40 + offset * 26
-            cv2.putText(frame, text, (24, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+            if speed is None and not spin_label:
+                continue
+            hitter = metric.get("hitter", "?")
+            parts = [self._HITTER_ZH.get(hitter, hitter)]
+            if speed is not None:
+                parts.append(f"{speed:.0f} km/h")
+            if spin_label:
+                parts.append(self._SPIN_ZH.get(spin_label, spin_label))
+            # "远端 87 km/h · 上旋":hitter 与数据段空格相连,数据段之间用 " · "
+            text = parts[0] + " " + " · ".join(parts[1:])
+            y = 22 + offset * 30
+            patch = self._text_patches.render(text, 22, (255, 255, 255))
+            if patch is not None:
+                TextPatchRenderer.blit(frame, patch, (24, y))
+            else:
+                # 无中文字体的降级路径:纯 ASCII(远端/近处退回 far/near,分隔符用空格)
+                ascii_parts = [{"upper": "far", "lower": "near"}.get(hitter, hitter)]
+                if speed is not None:
+                    ascii_parts.append(f"{speed:.0f} km/h")
+                if spin_label:
+                    ascii_parts.append(spin_label)
+                cv2.putText(frame, " ".join(ascii_parts), (24, y + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
             offset += 1
+
+    def _draw_rally_count(self, frame, frame_index, rally_starts, label_pos, font_size):
+        """画「回合: N」,N = start_frame <= 当前帧 的回合个数(视频开头第一拍之前不画)。"""
+        count = bisect.bisect_right(rally_starts, frame_index)
+        if count < 1:
+            return
+        size = int(font_size) if font_size else 24
+        patch = self._text_patches.render(f"回合: {count}", size, (0, 165, 255))
+        if patch is not None:
+            TextPatchRenderer.blit(frame, patch, label_pos)
+        else:
+            cv2.putText(frame, f"Rally: {count}", (int(label_pos[0]), int(label_pos[1]) + size),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 165, 255), 2, cv2.LINE_AA)
 
     def get_events(self):
         return list(self.events)

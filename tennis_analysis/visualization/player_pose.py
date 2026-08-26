@@ -176,7 +176,7 @@ class PlayerPoseVisualizer:
             margin_x = margin_y = float(margin)
         return -margin_x <= x <= 10.97 + margin_x and -margin_y <= y <= 23.77 + margin_y
 
-    def draw_players(self, frame, player_tracker, cached_movement_stats, stats_visualizer=None, rally_count=0):
+    def draw_players(self, frame, player_tracker, cached_movement_stats, stats_visualizer=None, rally_count=None):
         if self.current_box_data is not None:
             selected_players = {
                 position: player_tracker.players[position]

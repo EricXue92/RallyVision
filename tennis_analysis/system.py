@@ -542,12 +542,13 @@ class TennisAnalysisSystem:
 
         t0 = time.time()
 
+        # rally_count 不再在第一遍画:镜头切换计数对固定机位恒为 1(误导),
+        # 真回合数由 _finalize_bounce_detection 的第二遍标注按 extract_rallies 切分补画。
         self.player_pose_visualizer.draw_players(
-            frame=frame, 
-            player_tracker=self.player_tracker, 
+            frame=frame,
+            player_tracker=self.player_tracker,
             cached_movement_stats=self.cached_movement_stats,
             stats_visualizer=self.stats_visualizer if self.show_player_stats else None,
-            rally_count=self.rally_count
         )
         t1 = time.time()
         if self.show_performance_stats:
@@ -1013,6 +1014,36 @@ class TennisAnalysisSystem:
         if not self.temp_output_video_path or not os.path.exists(self.temp_output_video_path):
             return
 
+        # 真回合切分给标注视频画「回合: N」——第一遍的镜头切换计数对固定机位恒为 1
+        # (误导),这里用与比赛层同源的 extract_rallies 口径重算(比赛层要到
+        # annotate 之后才跑,顺序不能倒:它依赖本函数写盘的 shot_metrics/line_call;
+        # 这几步是纯内存计算,重复算一遍代价可忽略)。失败只降级不画,不阻断标注。
+        rally_spans = None
+        try:
+            from .analysis.match_layer import attach_shot_types, build_bounces, build_visible
+            from .analysis.rally import extract_rallies
+
+            detections_by_frame = {
+                int(record["frame"]): record
+                for record in self._load_detection_records()
+                if "frame" in record
+            }
+            shots_with_type = attach_shot_types(
+                shot_metrics_entries, detections_by_frame, self.fps,
+                upper_hand=self.upper_hand, lower_hand=self.lower_hand,
+            )
+            rallies = extract_rallies(
+                shots_with_type,
+                build_bounces(detections_by_frame),
+                build_visible(detections_by_frame, total_frames=self.total_frames),
+                self.fps,
+            )
+            if rallies:
+                rally_spans = [(r.start_frame, r.end_frame) for r in rallies]
+        except Exception as exc:  # noqa: BLE001 - 回合数只是叠加显示,不值得让标注失败
+            print(f"警告：回合切分失败，标注视频不画回合数 / rally split failed, skipping rally overlay: {exc}")
+
+        rally_label_pos, rally_label_scale = self.stats_visualizer.rally_label_geometry()
         annotated_path = os.path.join(self.save_dir, f"temp_bounce_{self.video_name}.mp4")
         self.bounce_detector.annotate_video(
             self.temp_output_video_path,
@@ -1023,6 +1054,9 @@ class TennisAnalysisSystem:
             draw_processed_trajectory=self.show_tennis_ball_trajectory,
             bounce_line_calls=bounce_line_calls,
             shot_hits={entry["hit_frame"]: entry for entry in shot_metrics_entries},
+            rally_spans=rally_spans,
+            rally_label_pos=rally_label_pos,
+            rally_label_font_size=max(8, int(rally_label_scale * 30)),
         )
         if os.path.exists(annotated_path):
             os.replace(annotated_path, self.temp_output_video_path)
