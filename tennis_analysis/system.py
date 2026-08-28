@@ -24,6 +24,7 @@ def load_runtime_dependencies():
     global median_keypoints_over_frames, keypoints_drifted
     global compute_shot_metrics_entries, write_shot_metrics, call_bounce
     global TrackNetBallDetector, TrackNetBallTrackerAdapter, compute_far_roi_rect
+    global TrackNetV4BallDetector
     global WASBBallDetector, WASBBallTrackerAdapter
 
     yolo_config_dir = os.path.join(tempfile.gettempdir(), "good-tennis-ultralytics")
@@ -63,6 +64,7 @@ def load_runtime_dependencies():
         from .detection.tracknet_ball import TrackNetBallDetector as _TrackNetBallDetector
         from .detection.tracknet_ball import TrackNetBallTrackerAdapter as _TrackNetBallTrackerAdapter
         from .detection.tracknet_ball import compute_far_roi_rect as _compute_far_roi_rect
+        from .detection.tracknet_v4_ball import TrackNetV4BallDetector as _TrackNetV4BallDetector
         from .detection.wasb_ball import WASBBallDetector as _WASBBallDetector
         from .detection.wasb_ball import WASBBallTrackerAdapter as _WASBBallTrackerAdapter
     except ModuleNotFoundError as exc:
@@ -112,6 +114,7 @@ def load_runtime_dependencies():
     TrackNetBallDetector = _TrackNetBallDetector
     TrackNetBallTrackerAdapter = _TrackNetBallTrackerAdapter
     compute_far_roi_rect = _compute_far_roi_rect
+    TrackNetV4BallDetector = _TrackNetV4BallDetector
     WASBBallDetector = _WASBBallDetector
     WASBBallTrackerAdapter = _WASBBallTrackerAdapter
 
@@ -131,6 +134,7 @@ class TennisAnalysisSystem:
                  bounce_classifier_path='', show_mini_map=True,
                  court_match_width=320,
                  ball_detector='yolo', tracknet_model_path='weights/tracknet_ball.pt',
+                 tracknetv4_model_path='weights/tracknet_v4_typeA.pt', tracknetv4_fusion='A',
                  wasb_model_path='weights/wasb_tennis.pth',
                  court_calibration='keypoints', keypoint_model_path='weights/court_keypoints.pt',
                  shot_metrics=True, line_call='doubles',
@@ -158,11 +162,13 @@ class TennisAnalysisSystem:
         self.court_match_width = court_match_width
 
         # Task 10: shot metrics / spin / line calling 主流程接线
-        self.ball_detector = ball_detector  # 'yolo' | 'tracknet' | 'wasb'
-        self.far_roi = bool(far_roi)  # 远场 ROI 二次推理开关（仅 tracknet 后端生效）
+        self.ball_detector = ball_detector  # 'yolo' | 'tracknet' | 'tracknetv4' | 'wasb'
+        self.far_roi = bool(far_roi)  # 远场 ROI 二次推理开关（tracknet / tracknetv4 后端生效）
         self._far_roi_rect_cache = None
         self._far_roi_rect_computed = False
         self.tracknet_model_path = tracknet_model_path
+        self.tracknetv4_model_path = tracknetv4_model_path
+        self.tracknetv4_fusion = tracknetv4_fusion
         self.wasb_model_path = wasb_model_path
         self.court_calibration = court_calibration  # 'keypoints' | 'homography'（强制降级）
         self.keypoint_model_path = keypoint_model_path
@@ -220,6 +226,12 @@ class TennisAnalysisSystem:
                 "Download the TrackNet weights and place them at weights/tracknet_ball.pt, "
                 "or pass --tracknet-model."
             )
+        if self.ball_detector == 'tracknetv4' and not os.path.exists(self.tracknetv4_model_path):
+            raise FileNotFoundError(
+                f"TrackNetV4 ball detection model not found: {self.tracknetv4_model_path}\n"
+                "Convert the upstream .keras checkpoint with tools/convert_tracknetv4.py "
+                "(see weights/README.md), or pass --tracknetv4-model."
+            )
 
         self.person_detector = None
         if self.player_detector == 'yolo-person':
@@ -233,7 +245,7 @@ class TennisAnalysisSystem:
         else:
             self.rtmpose_processor = RTMPoseProcessor(mode=self.pose_mode, pose_family=self.pose_family)
 
-        if self.ball_detector in ('tracknet', 'wasb'):
+        if self.ball_detector in ('tracknet', 'tracknetv4', 'wasb'):
             self.yolo_ball_model = None
         else:
             self.yolo_ball_model = YOLO(self.ball_model_path)
@@ -272,6 +284,11 @@ class TennisAnalysisSystem:
         if self.ball_detector == 'tracknet':
             tracknet_detector = TrackNetBallDetector(model_path=self.tracknet_model_path)
             self.tennis_ball_tracker = TrackNetBallTrackerAdapter(tracknet_detector, trajectory_length=30)
+        elif self.ball_detector == 'tracknetv4':
+            tracknet_v4_detector = TrackNetV4BallDetector(
+                model_path=self.tracknetv4_model_path, fusion=self.tracknetv4_fusion
+            )
+            self.tennis_ball_tracker = TrackNetBallTrackerAdapter(tracknet_v4_detector, trajectory_length=30)
         elif self.ball_detector == 'wasb':
             wasb_detector = WASBBallDetector(model_path=self.wasb_model_path)
             self.tennis_ball_tracker = WASBBallTrackerAdapter(wasb_detector, trajectory_length=30)
@@ -405,6 +422,8 @@ class TennisAnalysisSystem:
         """当前生效的球检测模型路径（三选一，供 metadata 记录）。"""
         if self.ball_detector == 'tracknet':
             return self.tracknet_model_path
+        if self.ball_detector == 'tracknetv4':
+            return self.tracknetv4_model_path
         if self.ball_detector == 'wasb':
             return self.wasb_model_path
         return self.ball_model_path
@@ -517,12 +536,12 @@ class TennisAnalysisSystem:
 
         centroids, point_left_hands, point_right_hands = self._detect_players(roi, x1, y1, detect_frame_count)
 
-        if self.ball_detector in ('tracknet', 'wasb'):
-            # Task 9b Step 1：球员框 gating 只接入 TrackNet/WASB 两个热图后端
-            # （brief 明确范围），YOLO 后端沿用旧调用不传 player_centers。
+        if self.ball_detector in ('tracknet', 'tracknetv4', 'wasb'):
+            # Task 9b Step 1：球员框 gating 只接入热图类后端（TrackNet / TrackNetV4 /
+            # WASB），YOLO 后端沿用旧调用不传 player_centers。
             player_centers = self._player_centers_for_gating(centroids)
-            if self.ball_detector == 'tracknet':
-                # 远场 ROI 二次推理仅接入 tracknet 后端（WASB 是备用后端，签名不动）
+            if self.ball_detector in ('tracknet', 'tracknetv4'):
+                # 远场 ROI 二次推理接入 tracknet 系后端（WASB 是备用后端，签名不动）
                 detected_ball_position = self.tennis_ball_tracker.detect_ball(
                     frame, roi_corners=roi_corners, player_centers=player_centers,
                     far_roi_rect=self._far_roi_rect_for_ball(),
@@ -1462,7 +1481,7 @@ class TennisAnalysisSystem:
         开关关闭 / 非 tracknet 后端 / 尚无球场标定 / 矩形退化时返回 None
         （detect_ball 收到 None 即退回单次全帧推理）。球场角点整段视频固定
         （手动/自动标注一次），矩形只算一次。"""
-        if not getattr(self, 'far_roi', False) or self.ball_detector != 'tracknet':
+        if not getattr(self, 'far_roi', False) or self.ball_detector not in ('tracknet', 'tracknetv4'):
             return None
         if getattr(self, '_far_roi_rect_computed', False):
             return self._far_roi_rect_cache

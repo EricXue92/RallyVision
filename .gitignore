@@ -20,6 +20,7 @@ tools/*
 !tools/report_builder.py
 !tools/worker.py
 !tools/render_heatmap.py
+!tools/convert_tracknetv4.py
 outputs/
 datasets/
 *.log

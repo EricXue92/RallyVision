@@ -166,6 +166,108 @@ candidate clear the confidence threshold"), so treat these as rough
 backend-selection signals, not accuracy claims. The default backend stays
 `yolo`; `tracknet`/`wasb` remain opt-in experiments via `--ball-detector`.
 
+## TrackNetV4 ball detector (`weights/tracknet_v4_*.pt`)
+
+Upstream: [TrackNetV4/TrackNetV4](https://github.com/TrackNetV4/TrackNetV4),
+**MIT licensed** — unlike the TrackNet / court-keypoint / bounce checkpoints
+above, redistribution rights here are explicit. The model is a TrackNetV2
+encoder-decoder plus a "motion prompt" attention layer: adjacent-frame
+grayscale differences are power-normalized into attention maps that modulate
+the per-frame output heatmaps, suppressing static-background responses.
+
+Upstream ships Keras 3 `.keras` checkpoints. To keep TensorFlow out of the
+worker runtime they are converted **offline** to PyTorch — a `.keras` file is
+just a zip whose `model.weights.h5` holds plain arrays, so h5py alone suffices:
+
+```bash
+uv run --with h5py tools/convert_tracknetv4.py \
+    --keras ~/Desktop/new_tennis/best_model_V1_NF_RIO_10u_e17.keras \
+    --out weights/tracknet_v4_typeA.pt
+```
+
+The fusion type (Type A / Type B / no-fusion V2 baseline) is auto-detected
+from the custom layer class names in the checkpoint's `config.json`. Use it
+with `--ball-detector tracknetv4 --tracknetv4-model <path> --tracknetv4-fusion
+<A|B|none>`; the fusion flag must match the weights.
+
+The port was verified numerically against the upstream Keras graph running on
+Keras 3's torch backend (custom layers reimplemented with `keras.ops`, no
+TensorFlow): on a real three-frame window from `videos/demo.mp4`, all three
+checkpoints agree to `max|diff| ~= 6e-6` with identical argmax peak positions.
+
+Two things the port has to get exactly right, both silent-failure-shaped:
+
+- **Input is RGB in forward temporal order** (`[t-2, t-1, t]`), 512x288, `/255`
+  — not the BGR / newest-first stacking the `tracknet` backend uses. The
+  9-channel reorder happens in `_TorchTrackNetV4Adapter`.
+- **`BatchNormalization` normalizes over W, not C.** Upstream writes
+  `BatchNormalization()` (default `axis=-1`) over `channels_first` data, so the
+  normalized axis is width; the saved parameter lengths (512/256/128/64 = each
+  stage's width) confirm it. `_WidthBatchNorm` replicates this; `nn.BatchNorm2d`
+  would be wrong. A side effect: **input width is locked to 512** — the BN
+  parameters are width-sized, so the network cannot be run at another width.
+
+### Backend comparison (honest numbers, no ROI / no gating)
+
+Only `new_tennis`-trained checkpoints are available (upstream's `RESULT.md`
+Download links are `#` placeholders, so the stronger standard-tennis-dataset
+checkpoints are not published). Fill rate alone cannot separate true detections
+from false ones, so trajectory plausibility is reported alongside it: implausible
+frame-to-frame jumps (>150px at 720p, scaled by resolution like the player-box
+gating does) and the max residual of a local quadratic fit over 5-frame
+all-visible windows — a ball follows a near-parabola in image space, so a
+well-tracked trajectory has a residual of a couple of pixels.
+
+**Broadcast footage — the incumbent wins decisively:**
+
+| Video | Backend | Fill rate | Jumps | Residual (median / p90) |
+| ----- | ------- | --------- | ----- | ----------------------- |
+| `demo.mp4` (Qatar Open) | tracknet @0.5 | 94.2% | 6/383 | 1.5 / 6.7 |
+| `demo.mp4` | tracknetv4 A @0.3 | 99.8% | 125/414 | 49.3 / 174.1 |
+| `demo.mp4` | tracknetv4 B @0.3 | 92.1% | 106/358 | 36.5 / 148.8 |
+| job `7bb0934f` (US Open) | tracknet @0.5 | 94.7% | 4/325 | 1.2 / 2.9 |
+| job `7bb0934f` | tracknetv4 A @0.3 | 93.3% | 50/320 | 17.0 / 109.1 |
+| job `7bb0934f` | tracknetv4 B @0.3 | 77.2% | 37/241 | 11.7 / 101.2 |
+
+**Amateur footage — the result flips.** Clips are the three `Amateur *.mp4`
+samples from [VKorpelshoek/GridTrackNet](https://github.com/VKorpelshoek/GridTrackNet)
+(1920x1080 club-court footage, far closer to what production actually ingests
+than any broadcast clip available locally):
+
+| Video | Backend | Fill rate | Jumps | Residual (median / p90) |
+| ----- | ------- | --------- | ----- | ----------------------- |
+| Amateur Hardcourt | tracknet @0.5 | 65.5% | 1/225 | 1.1 / 2.7 |
+| Amateur Hardcourt | **tracknetv4 A @0.5** | **79.5%** | 3/293 | **0.7 / 2.4** |
+| Amateur Grass | tracknet @0.5 | 59.8% | 5/87 | 1.1 / 124.2 |
+| Amateur Grass | **tracknetv4 A @0.5** | 58.5% | **1/87** | **0.6 / 3.4** |
+| Amateur Clay | tracknet @0.5 | 76.9% | 10/276 | 1.1 / 15.7 |
+| Amateur Clay | tracknetv4 A @0.5 | 70.6% | **7/256** | 1.0 / 34.6 |
+
+On Amateur Hardcourt TrackNetV4 Type A finds 85 frames the incumbent misses,
+**at equal-or-better trajectory quality** — and a manual crop check of a
+12-frame sample confirms 11 of them contain a visible ball, i.e. they are real
+recoveries, not false positives. That is exactly the far-court / serve
+detection hole that shows up downstream as missing bounce points.
+
+Two operating-point notes:
+
+- **Keep the confidence threshold at the 0.5 default.** Lowering it to 0.3
+  inflates fill rate with junk on every clip (residual p90 jumps to 75-216px).
+  The low-threshold rows above are shown to document that, not to recommend it.
+- Type A beats Type B consistently; the no-fusion baseline is never best.
+- TrackNetV4 also runs ~1.5x faster (12-13 fps vs 4.6-8.9 on MPS) despite the
+  motion-attention branch, because 512x288 is a smaller input than 640x360.
+
+Why it loses on broadcast and wins on amateur: the checkpoints are trained on
+upstream's `new_tennis` set, and the incumbent `tracknet` weights are trained on
+the standard broadcast tennis dataset — each wins in its own domain. The lower
+input resolution (512x288 vs 640x360, and the width is not adjustable — see the
+BN note above) is a real handicap for small far-court balls that the amateur
+clips' 1080p source partly offsets.
+
+The default backend is unchanged (`tracknet` in the worker); `tracknetv4` is
+opt-in pending an A/B on actual user uploads.
+
 ## Bounce detection model (`weights/ctb_regr_bounce.cbm`)
 
 Used by `tennis_analysis/analysis/bounce.py::BounceDetector` as the default
